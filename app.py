@@ -38,7 +38,11 @@ if uploaded:
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button("Baixar CSV", csv, "relatorio_patentes.csv", "text/csv")
 
-    pdf_path = Path("relatorio_patentes.pdf")
-    gerar_pdf(df, pdf_path)
-    with open(pdf_path, "rb") as f:
-        st.download_button("Baixar PDF", f, "relatorio_patentes.pdf", "application/pdf")
+    pdf_buffer = gerar_pdf(df_r)
+
+st.download_button(
+    "Baixar PDF",
+    pdf_buffer,
+    "relatorio_patentes.pdf",
+    "application/pdf"
+)
