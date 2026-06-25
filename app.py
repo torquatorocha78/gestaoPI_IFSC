@@ -4,6 +4,7 @@ import pandas as pd
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table
 from reportlab.lib.styles import getSampleStyleSheet
 from pathlib import Path
+from io import BytesIO
 
 st.set_page_config(page_title="Gestão de Patentes IFSC")
 
@@ -11,12 +12,15 @@ st.title("Gestão de Patentes – IFSC")
 
 uploaded = st.file_uploader("Upload da planilha base", type=["xlsx","csv"])
 
-def gerar_pdf(df, path):
+def gerar_pdf(df):
+    buffer = BytesIO()
     styles = getSampleStyleSheet()
-    doc = SimpleDocTemplate(path)
+    doc = SimpleDocTemplate(buffer)
     elementos = [Paragraph("Relatório de Patentes", styles["Title"])]
     elementos.append(Table([df.columns.tolist()] + df.values.tolist()))
     doc.build(elementos)
+    buffer.seek(0)
+    return buffer
 
 if uploaded:
     if uploaded.name.endswith(".csv"):
