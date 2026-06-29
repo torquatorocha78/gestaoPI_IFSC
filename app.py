@@ -220,115 +220,107 @@ elif pagina == "➕ Adicionar Patente":
             else:
                 st.error(f"❌ {mensagem}")
 
-elif pagina == "📁 Minhas Patentes":
-    st.title("📁 Minhas Patentes")
+elif pagina == "📂 Minhas Patentes":
+    st.title("📂 Minhas Patentes")
 
-    df_patentes = db.obter_patentes()
-
-    if len(df_patentes) == 0:
-        st.info("📭 Nenhuma patente cadastrada. Va em 'Adicionar Patente' para começar.")
+    if df.empty:
+        st.warning("Nenhuma planilha carregada.")
     else:
-        patentes_list = df_patentes["numero_patente"].tolist()
-        patente_selecionada = st.selectbox("Selecione uma patente:", patentes_list)
+        st.subheader("Selecionar patente")
 
-        patente_dados = df_patentes[df_patentes["numero_patente"] == patente_selecionada].iloc[0]
-        patente_id = patente_dados["id"]
+        # Coluna identificadora principal
+        coluna_id = "titulo" if "titulo" in df.columns else df.columns[0]
 
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("📝 Numero", patente_selecionada)
-        with col2:
-            st.metric("📅 Deposito", utils.formatar_data(patente_dados["data_deposito"]))
-        with col3:
-            concessao = utils.formatar_data(patente_dados["data_concessao"]) if patente_dados["data_concessao"] else "Pendente"
-            st.metric("✅ Concessao", concessao)
-        with col4:
-            st.metric("👤 Titular", patente_dados["titular"] if patente_dados["titular"] else "N/A")
-
-        if patente_dados["descricao"]:
-            st.info(f"**Descricao:** {patente_dados['descricao']}")
-
-        st.divider()
-        st.subheader("📊 Detalhamento de Anuidades")
-
-        anuidades = db.obter_anuidades(patente_id)
-
-        dados_tabela = []
-        for _, anu in anuidades.iterrows():
-            status = utils.calcular_status_anuidade(
-                anu["data_inicio_ordinario"],
-                anu["data_fim_ordinario"],
-                anu["data_inicio_extraordinario"],
-                anu["data_fim_extraordinario"],
-                anu["data_pagamento"],
-            )
-
-            dias_restantes = utils.obter_dias_restantes(
-                anu["data_fim_ordinario"],
-                anu["data_pagamento"],
-            )
-
-            emoji = utils.criar_emoji_status(status)
-
-            dados_tabela.append(
-                {
-                    "Anuidade": anu["numero_anuidade"],
-                    "Inicio Ordinario": utils.formatar_data(anu["data_inicio_ordinario"]),
-                    "Fim Ordinario": utils.formatar_data(anu["data_fim_ordinario"]),
-                    "Dias Restantes": str(dias_restantes) if not anu["data_pagamento"] else "Pago",
-                    "Status": f"{emoji} {utils.formatar_status(status)}",
-                    "Data Pagamento": utils.formatar_data(anu["data_pagamento"]) if anu["data_pagamento"] else "-",
-                }
-            )
-
-        df_tabela = pd.DataFrame(dados_tabela)
-
-        st.dataframe(
-            df_tabela.style.apply(colorir_linha_por_status, axis=1),
-            width="stretch",
-            hide_index=True,
+        patente_selecionada = st.selectbox(
+            "Escolha a patente para editar",
+            df[coluna_id].astype(str)
         )
 
-        st.divider()
-        st.subheader("💰 Registrar Pagamento")
+        # Índice da patente selecionada
+        idx = df[df[coluna_id].astype(str) == patente_selecionada].index[0]
 
-        col1, col2, col3 = st.columns(3)
+        st.divider()
+        st.subheader("Editar dados da patente")
+
+        # Formulário dinâmico para TODAS as colunas
+        with st.form("form_edicao_patente"):
+            novos_valores = {}
+
+            for col in df.columns:
+                valor_atual = df.loc[idx, col]
+
+                # Campos dinâmicos por tipo
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    novos_valores[col] = st.number_input(
+                        col,
+                        value=float(valor_atual) if pd.notna(valor_atual) else 0.0
+                    )
+
+                elif pd.api.types.is_datetime64_any_dtype(df[col]):
+                    novos_valores[col] = st.date_input(
+                        col,
+                        value=valor_atual
+                        if pd.notna(valor_atual)
+                        else pd.to_datetime("today")
+                    )
+
+                else:
+                    novos_valores[col] = st.text_input(
+                        col,
+                        value="" if pd.isna(valor_atual) else str(valor_atual)
+                    )
+
+            salvar = st.form_submit_button("💾 Salvar alterações")
+
+        # Aplicar alterações
+        if salvar:
+            for col, valor in novos_valores.items():
+                df.loc[idx, col] = valor
+
+            # Regra automática da anuidade (mantida)
+            gestores_ifsc = [
+                "ifsc",
+                "instituto federal de santa catarina",
+                "instituto federal de educação, ciência e tecnologia de santa catarina",
+                "instituto federal de santa catarina (br/sc)"
+            ]
+
+            if "gestor" in df.columns:
+                gestor = str(df.loc[idx, "gestor"]).strip().lower()
+                df.loc[idx, "pagar_anuidade"] = (
+                    "SIM" if gestor in gestores_ifsc else "NÃO"
+                )
+
+            st.success("Patente atualizada com sucesso.")
+
+        st.divider()
+
+        # Exportação do banco atualizado
+        st.subheader("Exportar banco atualizado")
+
+        col1, col2 = st.columns(2)
 
         with col1:
-            num_anuidade = st.selectbox(
-                "Selecione a anuidade",
-                anuidades["numero_anuidade"].tolist(),
-                key="select_anuidade",
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Baixar CSV atualizado",
+                csv,
+                "base_patentes_atualizada.csv",
+                "text/csv"
             )
 
         with col2:
-            data_pagamento_input = st.date_input(
-                "Data do Pagamento",
-                key="data_pag",
+            buffer = BytesIO()
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="Patentes")
+
+            buffer.seek(0)
+            st.download_button(
+                "📥 Baixar Excel atualizado",
+                buffer,
+                "base_patentes_atualizada.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
-        with col3:
-            st.write("")
-            st.write("")
-            if st.button("✅ Registrar Pagamento", width="stretch"):
-                db.atualizar_status_anuidade(
-                    patente_id,
-                    num_anuidade,
-                    "pago",
-                    data_pagamento_input.strftime("%Y-%m-%d"),
-                )
-                st.success("✅ Pagamento registrado com sucesso!")
-                st.rerun()
-
-        st.divider()
-
-        with st.expander("🗑️ Deletar Patente"):
-            confirmar_delecao = st.checkbox("Tenho certeza que desejo deletar esta patente.")
-            if st.button("Deletar Patente", width="stretch", disabled=not confirmar_delecao):
-                db.deletar_patente(patente_id)
-                st.success("✅ Patente deletada com sucesso!")
-                st.rerun()
-
 elif pagina == "📤 Importar Excel":
     st.title("📤 Importar Patentes do Excel")
 
