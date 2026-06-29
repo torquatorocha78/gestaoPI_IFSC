@@ -129,7 +129,7 @@ if pagina == "📊 Dashboard":
                     "ID": patente["id"],
                     "Patente": patente["numero_patente"],
                     "Deposito": utils.formatar_data(patente["data_deposito"]),
-                    "Status": f"{emoji} {utils.formatar_status(status_proxima)}",
+                    "Status": f"{emoji} {status_proxima}",
                     "Anuidade Prox.": anuidade_proxima,
                 }
             )
