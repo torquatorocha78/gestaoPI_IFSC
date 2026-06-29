@@ -1,4 +1,3 @@
-
 import sqlite3
 from datetime import datetime
 import pandas as pd
@@ -16,8 +15,8 @@ def init_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             numero_patente TEXT UNIQUE NOT NULL,
             data_deposito DATE NOT NULL,
-            data_concessao DATE,
-            descricao TEXT,
+            data_concessao DATE NOT NULL,
+            descricao TEXT NOT NULL,
             titular TEXT,
             gestor TEXT,
             status TEXT DEFAULT 'Ativo',
@@ -175,3 +174,4 @@ def importar_excel(caminho_arquivo):
         return resultados
     except Exception as e:
         return [("Erro", False, f"Erro ao importar: {str(e)}")]
+
