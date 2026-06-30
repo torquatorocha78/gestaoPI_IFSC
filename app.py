@@ -92,7 +92,7 @@ if pagina == "📊 Dashboard":
         
         st.divider()
         
-        st.subheading("Resumo de Patentes")
+        st.subheader("Resumo de Patentes")
         
         dados_dashboard = []
         for _, patente in df_patentes.iterrows():
@@ -224,7 +224,7 @@ elif pagina == "➕ Adicionar Patente":
                 st.success(f"✅ {mensagem}")
                 st.balloons()
                 
-                st.subheading("📅 Anuidades Calculadas")
+                st.subheader("📅 Anuidades Calculadas")
                 
                 df_patentes = db.obter_patentes()
                 patente_id = df_patentes[df_patentes['numero_patente'] == numero_patente]['id'].values[0]
@@ -280,7 +280,7 @@ elif pagina == "📁 Minhas Patentes":
         
         st.divider()
         
-        st.subheading("📊 Detalhamento de Anuidades")
+        st.subheader("📊 Detalhamento de Anuidades")
         
         anuidades = db.obter_anuidades(patente_id)
         
@@ -340,7 +340,7 @@ elif pagina == "📁 Minhas Patentes":
         
         st.divider()
         
-        st.subheading("💰 Registrar Pagamento / Marcar Anuidade")
+        st.subheader("💰 Registrar Pagamento / Marcar Anuidade")
         
         col1, col2, col3, col4 = st.columns(4)
         
@@ -410,7 +410,7 @@ elif pagina == "📤 Importar Excel":
             with st.spinner("Importando dados..."):
                 resultados = db.importar_excel(arquivo_excel)
             
-            st.subheading("📊 Resultado da Importacao")
+            st.subheader("📊 Resultado da Importacao")
             
             sucesso_count = sum(1 for _, sucesso, _ in resultados if sucesso)
             erro_count = len(resultados) - sucesso_count
@@ -466,7 +466,7 @@ elif pagina == "🤖 Análise IA":
         
         st.divider()
         
-        st.subheading("📊 Análises Rápidas")
+        st.subheader("📊 Análises Rápidas")
         
         col1, col2, col3 = st.columns(3)
         
@@ -493,7 +493,7 @@ elif pagina == "📄 Gerar Relatórios":
     if len(df_patentes) == 0:
         st.warning("⚠️ Nenhuma patente cadastrada. Primeiro, adicione algumas patentes.")
     else:
-        st.subheading("Escolha o tipo de relatório:")
+        st.subheader("Escolha o tipo de relatório:")
         
         col1, col2, col3 = st.columns(3)
         
@@ -532,7 +532,7 @@ elif pagina == "📄 Gerar Relatórios":
         
         st.divider()
         
-        st.subheading("📊 Exportação de Dados")
+        st.subheader("📊 Exportação de Dados")
         
         col1, col2 = st.columns(2)
         
@@ -555,4 +555,4 @@ elif pagina == "📄 Gerar Relatórios":
                     file_name="patentes_export.csv",
                     mime="text/csv"
                 )
-
+        
