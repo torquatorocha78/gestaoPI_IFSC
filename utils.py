@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
+from dateutil.parser import parse
+import pandas as pd
 
 def calcular_status_anuidade(data_inicio_ord, data_fim_ord, data_inicio_extraord, data_fim_extraord, data_pagamento=None):
     hoje = datetime.now().date()
@@ -41,15 +43,80 @@ def obter_dias_restantes(data_fim_ord, data_pagamento=None):
     hoje = datetime.now().date()
     
     if isinstance(data_fim_ord, str):
-        data_fim_ord = datetime.strptime(data_fim_ord, "%Y-%m-%d").date()
+        # Tentar diferentes formatos de data
+        try:
+            data_fim_ord = datetime.strptime(data_fim_ord, "%Y-%m-%d").date()
+        except Exception:
+            try:
+                data_fim_ord = datetime.strptime(data_fim_ord, "%Y-%m-%d %H:%M:%S").date()
+            except Exception:
+                try:
+                    data_fim_ord = parse(data_fim_ord).date()
+                except Exception:
+                    return '-'
     
     dias = (data_fim_ord - hoje).days
     return max(0, dias)
 
 def formatar_data(data):
+    """Format a date-like value to DD/MM/YYYY. Returns '-' when empty or invalid.
+
+    Handles:
+    - str in formats like 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS' or other parseable strings
+    - datetime.date / datetime.datetime / pandas.Timestamp / numpy datetime64
+    - None / NaT / NaN
+    """
+    if data is None:
+        return "-"
+
+    # pandas missing
+    try:
+        if isinstance(data, float) and pd.isna(data):
+            return "-"
+    except Exception:
+        pass
+
+    # If it's already a date/datetime-like object
+    try:
+        # pandas Timestamp or numpy datetime64
+        if hasattr(data, 'to_datetime64') or hasattr(data, 'tzinfo') or hasattr(data, 'year'):
+            try:
+                d = pd.to_datetime(data)
+                if pd.isna(d):
+                    return "-"
+                return d.date().strftime("%d/%m/%Y")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # If it's a string, try parsing robustly
     if isinstance(data, str):
-        data = datetime.strptime(data, "%Y-%m-%d").date()
-    return data.strftime("%d/%m/%Y") if data else "-"
+        data = data.strip()
+        if data == "":
+            return "-"
+        # Try common formats first for speed
+        for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y", "%d/%m/%Y %H:%M:%S"):
+            try:
+                d = datetime.strptime(data, fmt).date()
+                return d.strftime("%d/%m/%Y")
+            except Exception:
+                continue
+        # Fallback to dateutil.parser
+        try:
+            d = parse(data)
+            return d.date().strftime("%d/%m/%Y")
+        except Exception:
+            return data
+
+    # Try to coerce with pandas as last resort
+    try:
+        d = pd.to_datetime(data)
+        if pd.isna(d):
+            return "-"
+        return d.date().strftime("%d/%m/%Y")
+    except Exception:
+        return str(data)
 
 def obter_cor_status(status):
     cores = {
