@@ -1,205 +1,141 @@
+# database.py
 import sqlite3
-from datetime import datetime, date
 import pandas as pd
-from dateutil.relativedelta import relativedelta
-from pathlib import Path
+from datetime import date, timedelta
 
-DATABASE_FILE = Path("patentes.db")
+DB_NAME = "patentes.db"
 
-# =====================================================
-# CONEXÃO
-# =====================================================
 
 def conectar():
-    return sqlite3.connect(DATABASE_FILE, check_same_thread=False)
+    return sqlite3.connect(DB_NAME, check_same_thread=False)
 
-# =====================================================
-# NORMALIZAÇÃO DE DATAS
-# =====================================================
-
-def normalizar_data(data):
-    if data in (None, "", pd.NaT):
-        return None
-
-    if isinstance(data, pd.Timestamp):
-        return data.date().strftime("%Y-%m-%d")
-
-    if isinstance(data, (datetime, date)):
-        return data.strftime("%Y-%m-%d")
-
-    if isinstance(data, str):
-        data = data.strip()
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
-            try:
-                return datetime.strptime(data, fmt).strftime("%Y-%m-%d")
-            except ValueError:
-                pass
-
-    return None
-
-# =====================================================
-# CRIAÇÃO DO BANCO
-# =====================================================
 
 def init_database():
     conn = conectar()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS patentes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            numero_patente TEXT UNIQUE NOT NULL,
-            data_deposito DATE NOT NULL,
-            data_concessao DATE,
-            descricao TEXT,
-            titular TEXT,
-            gestor TEXT,
-            status TEXT DEFAULT 'Ativo',
-            data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS patentes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        numero_patente TEXT UNIQUE,
+        data_deposito DATE,
+        data_concessao DATE,
+        descricao TEXT,
+        titular TEXT
+    )
     """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS anuidades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            patente_id INTEGER NOT NULL,
-            numero_anuidade INTEGER NOT NULL,
-            data_inicio_ordinario DATE NOT NULL,
-            data_fim_ordinario DATE NOT NULL,
-            data_inicio_extraordinario DATE NOT NULL,
-            data_fim_extraordinario DATE NOT NULL,
-            status TEXT DEFAULT 'pendente',
-            data_pagamento DATE,
-            FOREIGN KEY (patente_id) REFERENCES patentes(id),
-            UNIQUE(patente_id, numero_anuidade)
-        )
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS anuidades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        patente_id INTEGER,
+        numero_anuidade INTEGER,
+        data_inicio_ordinario DATE,
+        data_fim_ordinario DATE,
+        data_inicio_extraordinario DATE,
+        data_fim_extraordinario DATE,
+        data_pagamento DATE,
+        status TEXT,
+        FOREIGN KEY (patente_id) REFERENCES patentes(id)
+    )
     """)
 
     conn.commit()
     conn.close()
 
-# =====================================================
-# PATENTES
-# =====================================================
-
-def adicionar_patente(numero_patente, data_deposito, data_concessao=None,
-                      descricao="", titular="", gestor="", status="Ativo"):
-
-    conn = conectar()
-    cursor = conn.cursor()
-
-    try:
-        data_dep = normalizar_data(data_deposito)
-        data_conc = normalizar_data(data_concessao)
-
-        cursor.execute("""
-            INSERT INTO patentes
-            (numero_patente, data_deposito, data_concessao, descricao, titular, gestor, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            numero_patente,
-            data_dep,
-            data_conc,
-            descricao.strip(),
-            titular.strip(),
-            gestor.strip(),
-            status.strip()
-        ))
-
-        patente_id = cursor.lastrowid
-        data_dep_date = datetime.strptime(data_dep, "%Y-%m-%d").date()
-
-        # 🔴 SEM QUALQUER REGRA DE "NÃO PAGAR"
-        for anuidade in range(1, 21):
-            inicio_ord = data_dep_date + relativedelta(years=3 + (anuidade - 1))
-            fim_ord = inicio_ord + relativedelta(months=3)
-            inicio_ext = fim_ord + relativedelta(days=1)
-            fim_ext = inicio_ext + relativedelta(months=6)
-
-            cursor.execute("""
-                INSERT INTO anuidades
-                (patente_id, numero_anuidade,
-                 data_inicio_ordinario, data_fim_ordinario,
-                 data_inicio_extraordinario, data_fim_extraordinario)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                patente_id,
-                anuidade,
-                inicio_ord.strftime("%Y-%m-%d"),
-                fim_ord.strftime("%Y-%m-%d"),
-                inicio_ext.strftime("%Y-%m-%d"),
-                fim_ext.strftime("%Y-%m-%d")
-            ))
-
-        conn.commit()
-        return True, "Patente adicionada com sucesso!"
-
-    except sqlite3.IntegrityError:
-        return False, "Patente já existe!"
-    except Exception as e:
-        return False, f"Erro: {e}"
-    finally:
-        conn.close()
-
-# =====================================================
-# CONSULTAS
-# =====================================================
 
 def obter_patentes():
     conn = conectar()
-    df = pd.read_sql("SELECT * FROM patentes ORDER BY data_deposito DESC", conn)
+    df = pd.read_sql("SELECT * FROM patentes ORDER BY id", conn)
     conn.close()
     return df
+
+
+def adicionar_patente(numero, data_dep, data_conc, descricao, titular):
+    conn = conectar()
+    cur = conn.cursor()
+
+    try:
+        cur.execute(
+            """
+            INSERT INTO patentes
+            (numero_patente, data_deposito, data_concessao, descricao, titular)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (numero, data_dep, data_conc, descricao, titular),
+        )
+        patente_id = cur.lastrowid
+
+        inicio = pd.to_datetime(data_dep)
+        for i in range(1, 21):
+            ini_ord = inicio + pd.DateOffset(years=i - 1)
+            fim_ord = ini_ord + pd.DateOffset(months=3)
+            ini_ext = fim_ord
+            fim_ext = ini_ext + pd.DateOffset(months=3)
+
+            cur.execute(
+                """
+                INSERT INTO anuidades
+                (patente_id, numero_anuidade,
+                 data_inicio_ordinario, data_fim_ordinario,
+                 data_inicio_extraordinario, data_fim_extraordinario,
+                 status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    patente_id,
+                    i,
+                    ini_ord.date(),
+                    fim_ord.date(),
+                    ini_ext.date(),
+                    fim_ext.date(),
+                    "PENDENTE",
+                ),
+            )
+
+        conn.commit()
+        return True, "Patente cadastrada com sucesso"
+
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
 
 def obter_anuidades(patente_id):
     conn = conectar()
-    df = pd.read_sql("""
-        SELECT *
-        FROM anuidades
-        WHERE patente_id = ?
-        ORDER BY numero_anuidade
-    """, conn, params=(patente_id,))
+    df = pd.read_sql(
+        "SELECT * FROM anuidades WHERE patente_id = ? ORDER BY numero_anuidade",
+        conn,
+        params=(patente_id,),
+    )
     conn.close()
+
+    hoje = date.today()
+
+    def normalizar_status(row):
+        if row["data_pagamento"]:
+            return "PAGA"
+        if row["data_fim_extraordinario"] and pd.to_datetime(row["data_fim_extraordinario"]).date() < hoje:
+            return "PAGA"
+        return "PENDENTE"
+
+    df["status"] = df.apply(normalizar_status, axis=1)
     return df
 
-# =====================================================
-# ATUALIZAÇÕES
-# =====================================================
 
-def atualizar_status_anuidade(patente_id, numero_anuidade, status, data_pagamento=None):
+def atualizar_status_anuidade(patente_id, numero_anuidade, data_pagamento):
     conn = conectar()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute("""
+    cur.execute(
+        """
         UPDATE anuidades
-        SET status = ?, data_pagamento = ?
+        SET data_pagamento = ?, status = 'PAGA'
         WHERE patente_id = ? AND numero_anuidade = ?
-    """, (
-        status,
-        normalizar_data(data_pagamento),
-        patente_id,
-        numero_anuidade
-    ))
-
-    conn.commit()
-    conn.close()
-
-def atualizar_patente(patente_id, data_concessao, descricao, titular, gestor, status):
-    conn = conectar()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        UPDATE patentes
-        SET data_concessao = ?, descricao = ?, titular = ?, gestor = ?, status = ?
-        WHERE id = ?
-    """, (
-        normalizar_data(data_concessao),
-        descricao.strip(),
-        titular.strip(),
-        gestor.strip(),
-        status.strip(),
-        patente_id
-    ))
+        """,
+        (data_pagamento, patente_id, numero_anuidade),
+    )
 
     conn.commit()
     conn.close()
