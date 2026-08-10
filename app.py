@@ -473,11 +473,16 @@ elif pagina == "📁 Minhas Patentes":
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            num_anuidade = st.selectbox(
-                "Selecione a anuidade",
-                anuidades['numero_anuidade'].tolist(),
-                key="select_anuidade"
-            )
+            if lista_anuidades:
+                num_anuidade = st.selectbox(
+                    "Selecione a anuidade",
+                    lista_anuidades,
+                    key=f"select_anuidade_{patente_id}"
+                )
+            else:
+                st.warning("Nenhuma anuidade disponível")
+                num_anuidade = None
+            
         
         with col2:
             data_pagamento_input = st.date_input(
