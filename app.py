@@ -59,117 +59,92 @@ if pagina == "📊 Dashboard":
         st.info("📭 Nenhuma patente cadastrada ainda. Adicione uma patente para começar!")
     else:
         total_patentes = len(df_patentes)
-        
-        alertas_verde = 0
-        alertas_amarelo = 0
-        alertas_vermelho = 0
-        alertas_pago = 0
-        
+
+        hoje = datetime.now().date()
+
+        def data_anuidade(valor):
+            try:
+                return pd.to_datetime(valor).date()
+            except Exception:
+                return None
+
+        def dados_prazo_ordinario(anu):
+            if anu['status'] == 'nao_pagar' or anu['data_pagamento']:
+                return None
+
+            inicio_ord = data_anuidade(anu['data_inicio_ordinario'])
+            fim_ord = data_anuidade(anu['data_fim_ordinario'])
+            if not inicio_ord or not fim_ord or not (inicio_ord <= hoje <= fim_ord):
+                return None
+
+            dias_restantes = (fim_ord - hoje).days
+            status = 'amarelo' if dias_restantes <= 30 else 'verde'
+            return status, dias_restantes
+
+        dados_dashboard = []
+
         for _, patente in df_patentes.iterrows():
             anuidades = db.obter_anuidades(patente['id'])
             for _, anu in anuidades.iterrows():
-                # Verificar se está marcado como "não pagar"
-                if anu['status'] == 'nao_pagar':
+                prazo = dados_prazo_ordinario(anu)
+                if not prazo:
                     continue
-                    
-                status = utils.calcular_status_anuidade(
-                    anu['data_inicio_ordinario'],
-                    anu['data_fim_ordinario'],
-                    anu['data_inicio_extraordinario'],
-                    anu['data_fim_extraordinario'],
-                    anu['data_pagamento']
-                )
-                if status == 'verde':
-                    alertas_verde += 1
-                elif status == 'amarelo':
-                    alertas_amarelo += 1
-                elif status == 'vermelho':
-                    alertas_vermelho += 1
-                elif status == 'pago':
-                    alertas_pago += 1
-        
-        col1, col2, col3, col4, col5 = st.columns(5)
+
+                status, dias_restantes = prazo
+                emoji = utils.criar_emoji_status(status)
+                dados_dashboard.append({
+                    "ID": patente['id'],
+                    "Patente": patente['numero_patente'],
+                    "Título": patente.get('titulo') or "-",
+                    "Deposito": utils.formatar_data(patente['data_deposito']),
+                    "Status": f"{emoji} {status.upper()}",
+                    "Anuidade": anu['numero_anuidade'],
+                    "Fim Prazo Ordinário": utils.formatar_data(anu['data_fim_ordinario']),
+                    "Dias p/ Vencer": dias_restantes,
+                    "Gestor": patente.get('gestor', 'N/A'),
+                    "Campus": patente.get('campus') or "-"
+                })
+
+        alertas_verde = sum(1 for item in dados_dashboard if '✅' in item["Status"])
+        alertas_amarelo = sum(1 for item in dados_dashboard if '⚠️' in item["Status"])
+
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             st.metric("📚 Total de Patentes", total_patentes)
         
         with col2:
-            st.metric("✅ Normal", alertas_verde, delta="green")
+            st.metric("📅 Em Prazo Ordinário", len(dados_dashboard))
         
         with col3:
-            st.metric("⚠️ Atenção", alertas_amarelo, delta="orange")
+            st.metric("✅ Normal", alertas_verde, delta="green")
         
         with col4:
-            st.metric("❌ Vencido", alertas_vermelho, delta="red")
-        
-        with col5:
-            st.metric("💰 Pago", alertas_pago, delta="blue")
+            st.metric("⚠️ Atenção", alertas_amarelo, delta="orange")
         
         st.divider()
         
-        st.subheader("Resumo de Patentes")
-        
-        dados_dashboard = []
-        for _, patente in df_patentes.iterrows():
-            anuidades = db.obter_anuidades(patente['id'])
-            
-            anuidade_proxima = None
-            status_proxima = 'verde'
-            
-            for _, anu in anuidades.iterrows():
-                if anu['status'] == 'nao_pagar':
-                    continue
-                    
-                status = utils.calcular_status_anuidade(
-                    anu['data_inicio_ordinario'],
-                    anu['data_fim_ordinario'],
-                    anu['data_inicio_extraordinario'],
-                    anu['data_fim_extraordinario'],
-                    anu['data_pagamento']
-                )
-                if status == 'vermelho':
-                    anuidade_proxima = anu['numero_anuidade']
-                    status_proxima = 'vermelho'
-                    break
-                elif status == 'amarelo' and status_proxima != 'vermelho':
-                    anuidade_proxima = anu['numero_anuidade']
-                    status_proxima = 'amarelo'
-                elif anuidade_proxima is None:
-                    anuidade_proxima = anu['numero_anuidade']
-                    status_proxima = status
-            
-            emoji = utils.criar_emoji_status(status_proxima)
-            
-            dados_dashboard.append({
-                "ID": patente['id'],
-                "Patente": patente['numero_patente'],
-                "Título": patente.get('titulo') or "-",
-                "Deposito": utils.formatar_data(patente['data_deposito']),
-                "Status": f"{emoji} {status_proxima.upper()}",
-                "Anuidade Prox.": anuidade_proxima,
-                "Gestor": patente.get('gestor', 'N/A'),
-                "Campus": patente.get('campus') or "-"
-            })
+        st.subheader("Anuidades em Prazo Ordinário")
         
         df_dashboard = pd.DataFrame(dados_dashboard)
         
         def colorir_status(row):
-            if '❌' in str(row['Status']):
-                return ['background-color: #ffcccc'] * len(row)
-            elif '⚠️' in str(row['Status']):
+            if '⚠️' in str(row['Status']):
                 return ['background-color: #ffffcc'] * len(row)
             elif '✅' in str(row['Status']):
                 return ['background-color: #ccffcc'] * len(row)
-            elif '💰' in str(row['Status']):
-                return ['background-color: #ccddff'] * len(row)
             else:
                 return [''] * len(row)
-        
-        st.dataframe(
-            df_dashboard.style.apply(colorir_status, axis=1),
-            use_container_width=True,
-            hide_index=True
-        )
+
+        if df_dashboard.empty:
+            st.info("Nenhuma anuidade está em prazo ordinário neste momento.")
+        else:
+            df_dashboard = df_dashboard.sort_values("Dias p/ Vencer")
+            st.dataframe(
+                df_dashboard.style.apply(colorir_status, axis=1),
+                use_container_width=True,
+                hide_index=True
+            )
 
 elif pagina == "➕ Adicionar Patente":
     st.title("➕ Adicionar Nova Patente")
