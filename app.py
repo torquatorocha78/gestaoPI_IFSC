@@ -473,10 +473,14 @@ elif pagina == "📁 Minhas Patentes":
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
+            opcoes_anuidades = anuidades ['numero_anuidade'].tolist()
+            
             num_anuidade = st.selectbox(
                 "Selecione a anuidade",
-                anuidades['numero_anuidade'].tolist(),
-                key="select_anuidade"
+                options=opcpes_anuidades,
+                index=0
+            
+                key=f"select_anuidade"_{patente_id}"
             )
         
         with col2:
