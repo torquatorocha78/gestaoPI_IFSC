@@ -58,6 +58,7 @@ def init_database():
 
     conn.commit()
     conn.close()
+    garantir_anuidades_existentes()
 
 
 def obter_patentes():
@@ -212,6 +213,68 @@ def adicionar_patente(
         conn.close()
 
 
+def _calcular_datas_anuidade(data_dep, numero_anuidade):
+    inicio = pd.to_datetime(data_dep)
+    ini_ord = inicio + pd.DateOffset(years=numero_anuidade - 1)
+    fim_ord = ini_ord + pd.DateOffset(months=3)
+    ini_ext = fim_ord
+    fim_ext = ini_ext + pd.DateOffset(months=3)
+    return ini_ord.date(), fim_ord.date(), ini_ext.date(), fim_ext.date()
+
+
+def _garantir_anuidades_patente(cur, patente_id, data_dep):
+    if not data_dep:
+        return
+
+    cur.execute(
+        "SELECT numero_anuidade FROM anuidades WHERE patente_id = ?",
+        (patente_id,),
+    )
+    existentes = {row[0] for row in cur.fetchall()}
+
+    for numero_anuidade in range(1, 21):
+        if numero_anuidade in existentes:
+            continue
+
+        ini_ord, fim_ord, ini_ext, fim_ext = _calcular_datas_anuidade(
+            data_dep,
+            numero_anuidade,
+        )
+        cur.execute(
+            """
+            INSERT INTO anuidades
+            (patente_id, numero_anuidade,
+             data_inicio_ordinario, data_fim_ordinario,
+             data_inicio_extraordinario, data_fim_extraordinario,
+             status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                patente_id,
+                numero_anuidade,
+                ini_ord,
+                fim_ord,
+                ini_ext,
+                fim_ext,
+                "pendente",
+            ),
+        )
+
+
+def garantir_anuidades_existentes():
+    conn = conectar()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, data_deposito FROM patentes")
+    patentes = cur.fetchall()
+
+    for patente_id, data_dep in patentes:
+        _garantir_anuidades_patente(cur, patente_id, data_dep)
+
+    conn.commit()
+    conn.close()
+
+
 def atualizar_patente(
     patente_id,
     numero,
@@ -281,7 +344,18 @@ def salvar_patente_importada(dados):
 
 
 def obter_anuidades(patente_id):
+    patente_id = int(patente_id)
     conn = conectar()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT data_deposito FROM patentes WHERE id = ?",
+        (patente_id,),
+    )
+    patente = cur.fetchone()
+    if patente:
+        _garantir_anuidades_patente(cur, patente_id, patente[0])
+        conn.commit()
+
     df = pd.read_sql(
         "SELECT * FROM anuidades WHERE patente_id = ? ORDER BY numero_anuidade",
         conn,
@@ -320,6 +394,8 @@ def atualizar_status_anuidade(patente_id, numero_anuidade, novo_status, data_pag
     data_pagamento: string 'YYYY-MM-DD' ou None
     Compatível com os usos em app.py.
     """
+    patente_id = int(patente_id)
+    numero_anuidade = int(numero_anuidade)
     conn = conectar()
     cur = conn.cursor()
 
@@ -359,6 +435,7 @@ def atualizar_status_anuidade(patente_id, numero_anuidade, novo_status, data_pag
 
 
 def deletar_patente(patente_id):
+    patente_id = int(patente_id)
     conn = conectar()
     cur = conn.cursor()
     cur.execute("DELETE FROM anuidades WHERE patente_id = ?", (patente_id,))
@@ -467,3 +544,4 @@ def analisar_inconsistencias_excel(arquivo_excel):
         problemas.append("A planilha não tem uma coluna chamada Atributos; o campo existe no app e ficará vazio até ser preenchido/importado.")
 
     return problemas
+
