@@ -151,3 +151,4 @@ def gerar_alertas(df_patentes):
         alertas += "✅ Nenhum alerta urgente! Todas as anuidades estão em dia."
     
     return alertas
+
