@@ -16,6 +16,21 @@ st.set_page_config(
 
 db.init_database()
 
+
+def data_para_input(valor):
+    if valor is None or pd.isna(valor) or valor == "":
+        return None
+    try:
+        return pd.to_datetime(valor).date()
+    except Exception:
+        return None
+
+
+def texto(valor):
+    if valor is None or pd.isna(valor):
+        return ""
+    return str(valor)
+
 st.markdown("""
 <style>
     .status-verde { color: #00CC00; font-weight: bold; }
@@ -128,10 +143,12 @@ if pagina == "📊 Dashboard":
             dados_dashboard.append({
                 "ID": patente['id'],
                 "Patente": patente['numero_patente'],
+                "Título": patente.get('titulo') or "-",
                 "Deposito": utils.formatar_data(patente['data_deposito']),
                 "Status": f"{emoji} {status_proxima.upper()}",
                 "Anuidade Prox.": anuidade_proxima,
-                "Gestor": patente.get('gestor', 'N/A')
+                "Gestor": patente.get('gestor', 'N/A'),
+                "Campus": patente.get('campus') or "-"
             })
         
         df_dashboard = pd.DataFrame(dados_dashboard)
@@ -165,6 +182,11 @@ elif pagina == "➕ Adicionar Patente":
             placeholder="Ex: BR1020220000001",
             help="Identificador unico da patente"
         )
+
+        titulo = st.text_input(
+            "Título",
+            placeholder="Título da patente"
+        )
         
         data_deposito = st.date_input(
             "Data do Deposito",
@@ -188,17 +210,34 @@ elif pagina == "➕ Adicionar Patente":
             "Titular/Proprietario (opcional)",
             placeholder="Ex: Empresa XYZ"
         )
+
+        inventores = st.text_area(
+            "Nome dos Inventores (opcional)",
+            placeholder="Separe os nomes por / ou por linha",
+            height=90
+        )
         
         status_patente = st.selectbox(
             "Status (opcional)",
-            ["Ativo", "Indeferido", "Arquivado", "Desistência"],
+            ["Ativo", "Patente Concedida", "Tramitando Normal", "Indeferimento", "Recurso contra indeferimento", "Pedido de exame", "Arquivado", "Desistência"],
             help="Status atual da patente"
+        )
+
+        campus = st.text_input(
+            "Campus (opcional)",
+            placeholder="Ex: Florianópolis, Joinville"
         )
     
     descricao = st.text_area(
-        "Descricao (opcional)",
+        "Resumo/Descricao (opcional)",
         placeholder="Descreva brevemente o objeto da patente",
         height=100
+    )
+
+    atributos = st.text_area(
+        "Atributos (opcional)",
+        placeholder="Informações complementares ou classificações",
+        height=80
     )
     
     st.divider()
@@ -217,7 +256,11 @@ elif pagina == "➕ Adicionar Patente":
                 descricao,
                 titular,
                 gestor,
-                status_patente
+                status_patente,
+                titulo,
+                inventores,
+                campus,
+                atributos
             )
             
             if sucesso:
@@ -253,8 +296,27 @@ elif pagina == "📁 Minhas Patentes":
     if len(df_patentes) == 0:
         st.info("📭 Nenhuma patente cadastrada. Va em 'Adicionar Patente' para começar.")
     else:
-        patentes_list = df_patentes['numero_patente'].tolist()
-        patente_selecionada = st.selectbox("Selecione uma patente:", patentes_list)
+        busca = st.text_input("Buscar por número, título, inventor, gestor ou campus:")
+        df_filtrado = df_patentes.copy()
+        if busca:
+            termo = busca.lower()
+            colunas_busca = ["numero_patente", "titulo", "inventores", "gestor", "campus"]
+            mascara = pd.Series(False, index=df_filtrado.index)
+            for coluna in colunas_busca:
+                if coluna in df_filtrado:
+                    mascara = mascara | df_filtrado[coluna].fillna("").astype(str).str.lower().str.contains(termo, regex=False)
+            df_filtrado = df_filtrado[mascara]
+
+        if len(df_filtrado) == 0:
+            st.warning("Nenhuma patente encontrada com esse filtro.")
+            st.stop()
+
+        opcoes = {
+            f"{row['numero_patente']} - {row.get('titulo') or 'Sem título'}": row['numero_patente']
+            for _, row in df_filtrado.iterrows()
+        }
+        patente_label = st.selectbox("Selecione uma patente:", list(opcoes.keys()))
+        patente_selecionada = opcoes[patente_label]
         
         patente_dados = df_patentes[df_patentes['numero_patente'] == patente_selecionada].iloc[0]
         patente_id = patente_dados['id']
@@ -274,9 +336,75 @@ elif pagina == "📁 Minhas Patentes":
             st.metric("🔑 Gestor", patente_dados.get('gestor', 'N/A'))
         with col2:
             st.metric("📊 Status", patente_dados.get('status', 'Ativo'))
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("🏫 Campus", patente_dados.get('campus') if patente_dados.get('campus') else "N/A")
+        with col2:
+            st.metric("📌 Título", patente_dados.get('titulo') if patente_dados.get('titulo') else "Sem título")
+
+        if patente_dados.get('inventores'):
+            st.info(f"**Inventores:** {patente_dados['inventores']}")
+
+        if patente_dados.get('atributos'):
+            st.info(f"**Atributos:** {patente_dados['atributos']}")
         
         if patente_dados['descricao']:
-            st.info(f"**Descricao:** {patente_dados['descricao']}")
+            st.info(f"**Resumo/Descricao:** {patente_dados['descricao']}")
+
+        st.divider()
+
+        with st.expander("✏️ Editar dados da patente"):
+            with st.form(f"form_editar_{patente_id}"):
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    edit_numero = st.text_input("Número da Patente", value=texto(patente_dados.get('numero_patente')))
+                    edit_titulo = st.text_input("Título", value=texto(patente_dados.get('titulo')))
+                    edit_data_dep = st.date_input(
+                        "Data do Depósito",
+                        value=data_para_input(patente_dados.get('data_deposito'))
+                    )
+                    edit_data_conc = st.date_input(
+                        "Data de Concessão",
+                        value=data_para_input(patente_dados.get('data_concessao'))
+                    )
+                    edit_gestor = st.text_input("Gestor", value=texto(patente_dados.get('gestor')))
+                    edit_campus = st.text_input("Campus", value=texto(patente_dados.get('campus')))
+
+                with col2:
+                    edit_titular = st.text_area("Depositante/Titular", value=texto(patente_dados.get('titular')), height=90)
+                    edit_inventores = st.text_area("Nome dos Inventores", value=texto(patente_dados.get('inventores')), height=90)
+                    edit_status = st.text_input("Status do Pedido", value=texto(patente_dados.get('status')))
+                    edit_atributos = st.text_area("Atributos", value=texto(patente_dados.get('atributos')), height=90)
+
+                edit_descricao = st.text_area("Resumo/Descrição", value=texto(patente_dados.get('descricao')), height=130)
+
+                salvar = st.form_submit_button("💾 Salvar alterações", use_container_width=True, type="primary")
+
+                if salvar:
+                    if not edit_numero or not edit_data_dep:
+                        st.error("Preencha pelo menos o número da patente e a data do depósito.")
+                    else:
+                        ok, msg = db.atualizar_patente(
+                            patente_id,
+                            edit_numero,
+                            edit_data_dep.strftime("%Y-%m-%d") if edit_data_dep else None,
+                            edit_data_conc.strftime("%Y-%m-%d") if edit_data_conc else None,
+                            edit_descricao,
+                            edit_titular,
+                            edit_gestor,
+                            edit_status,
+                            edit_titulo,
+                            edit_inventores,
+                            edit_campus,
+                            edit_atributos
+                        )
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
         
         st.divider()
         
@@ -284,99 +412,102 @@ elif pagina == "📁 Minhas Patentes":
         
         anuidades = db.obter_anuidades(patente_id)
         
-        dados_tabela = []
-        for _, anu in anuidades.iterrows():
-            if anu['status'] == 'nao_pagar':
-                emoji = '⛔'
-                status_display = 'NÃO PAGAR'
-                dias_restantes = '-'
-            else:
-                status = utils.calcular_status_anuidade(
-                    anu['data_inicio_ordinario'],
-                    anu['data_fim_ordinario'],
-                    anu['data_inicio_extraordinario'],
-                    anu['data_fim_extraordinario'],
-                    anu['data_pagamento']
-                )
+        if anuidades.empty:
+            st.warning("Nenhuma anuidade encontrada para esta patente. Verifique a data de depósito cadastrada.")
+        else:
+            dados_tabela = []
+            for _, anu in anuidades.iterrows():
+                if anu['status'] == 'nao_pagar':
+                    emoji = '⛔'
+                    status_display = 'NÃO PAGAR'
+                    dias_restantes = '-'
+                else:
+                    status = utils.calcular_status_anuidade(
+                        anu['data_inicio_ordinario'],
+                        anu['data_fim_ordinario'],
+                        anu['data_inicio_extraordinario'],
+                        anu['data_fim_extraordinario'],
+                        anu['data_pagamento']
+                    )
+                    
+                    dias_restantes = utils.obter_dias_restantes(
+                        anu['data_fim_ordinario'],
+                        anu['data_pagamento']
+                    )
+                    
+                    emoji = utils.criar_emoji_status(status)
+                    status_display = status.upper()
                 
-                dias_restantes = utils.obter_dias_restantes(
-                    anu['data_fim_ordinario'],
-                    anu['data_pagamento']
-                )
-                
-                emoji = utils.criar_emoji_status(status)
-                status_display = status.upper()
+                dados_tabela.append({
+                    "Anuidade": anu['numero_anuidade'],
+                    "Inicio Ordinario": utils.formatar_data(anu['data_inicio_ordinario']),
+                    "Fim Ordinario": utils.formatar_data(anu['data_fim_ordinario']),
+                    "Dias Restantes": dias_restantes if dias_restantes != '-' else ("Pago" if anu['data_pagamento'] else '-'),
+                    "Status": f"{emoji} {status_display}",
+                    "Data Pagamento": utils.formatar_data(anu['data_pagamento']) if anu['data_pagamento'] else "-"
+                })
             
-            dados_tabela.append({
-                "Anuidade": anu['numero_anuidade'],
-                "Inicio Ordinario": utils.formatar_data(anu['data_inicio_ordinario']),
-                "Fim Ordinario": utils.formatar_data(anu['data_fim_ordinario']),
-                "Dias Restantes": dias_restantes if dias_restantes != '-' else ("Pago" if anu['data_pagamento'] else '-'),
-                "Status": f"{emoji} {status_display}",
-                "Data Pagamento": utils.formatar_data(anu['data_pagamento']) if anu['data_pagamento'] else "-"
-            })
-        
-        df_tabela = pd.DataFrame(dados_tabela)
-        
-        def colorir_linhas(row):
-            if '⛔' in str(row['Status']):
-                return ['background-color: #e6e6e6'] * len(row)
-            elif '❌' in str(row['Status']):
-                return ['background-color: #ffcccc'] * len(row)
-            elif '⚠️' in str(row['Status']):
-                return ['background-color: #ffffcc'] * len(row)
-            elif '✅' in str(row['Status']):
-                return ['background-color: #ccffcc'] * len(row)
-            elif '💰' in str(row['Status']):
-                return ['background-color: #ccddff'] * len(row)
-            else:
-                return [''] * len(row)
-        
-        st.dataframe(
-            df_tabela.style.apply(colorir_linhas, axis=1),
-            use_container_width=True,
-            hide_index=True
-        )
-        
-        st.divider()
-        
-        st.subheader("💰 Registrar Pagamento / Marcar Anuidade")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            num_anuidade = st.selectbox(
-                "Selecione a anuidade",
-                anuidades['numero_anuidade'].tolist(),
-                key="select_anuidade"
+            df_tabela = pd.DataFrame(dados_tabela)
+            
+            def colorir_linhas(row):
+                if '⛔' in str(row['Status']):
+                    return ['background-color: #e6e6e6'] * len(row)
+                elif '❌' in str(row['Status']):
+                    return ['background-color: #ffcccc'] * len(row)
+                elif '⚠️' in str(row['Status']):
+                    return ['background-color: #ffffcc'] * len(row)
+                elif '✅' in str(row['Status']):
+                    return ['background-color: #ccffcc'] * len(row)
+                elif '💰' in str(row['Status']):
+                    return ['background-color: #ccddff'] * len(row)
+                else:
+                    return [''] * len(row)
+            
+            st.dataframe(
+                df_tabela.style.apply(colorir_linhas, axis=1),
+                use_container_width=True,
+                hide_index=True
             )
-        
-        with col2:
-            data_pagamento_input = st.date_input(
-                "Data do Pagamento",
-                key="data_pag"
-            )
-        
-        with col3:
-            if st.button("✅ Registrar Pagamento", use_container_width=True):
-                db.atualizar_status_anuidade(
-                    patente_id,
-                    num_anuidade,
-                    "pago",
-                    data_pagamento_input.strftime("%Y-%m-%d")
+            
+            st.divider()
+            
+            st.subheader("💰 Registrar Pagamento / Marcar Anuidade")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                num_anuidade = st.selectbox(
+                    "Selecione a anuidade",
+                    anuidades['numero_anuidade'].tolist(),
+                    key="select_anuidade"
                 )
-                st.success("✅ Pagamento registrado com sucesso!")
-                st.rerun()
-        
-        with col4:
-            if st.button("🚫 Marcar Não Pagar", use_container_width=True):
-                db.atualizar_status_anuidade(
-                    patente_id,
-                    num_anuidade,
-                    "nao_pagar"
+            
+            with col2:
+                data_pagamento_input = st.date_input(
+                    "Data do Pagamento",
+                    key="data_pag"
                 )
-                st.success("✅ Anuidade marcada como não pagar!")
-                st.rerun()
+            
+            with col3:
+                if st.button("✅ Registrar Pagamento", use_container_width=True):
+                    db.atualizar_status_anuidade(
+                        patente_id,
+                        num_anuidade,
+                        "pago",
+                        data_pagamento_input.strftime("%Y-%m-%d")
+                    )
+                    st.success("✅ Pagamento registrado com sucesso!")
+                    st.rerun()
+            
+            with col4:
+                if st.button("🚫 Marcar Não Pagar", use_container_width=True):
+                    db.atualizar_status_anuidade(
+                        patente_id,
+                        num_anuidade,
+                        "nao_pagar"
+                    )
+                    st.success("✅ Anuidade marcada como não pagar!")
+                    st.rerun()
         
         st.divider()
         
@@ -406,6 +537,12 @@ elif pagina == "📤 Importar Excel":
     )
     
     if arquivo_excel:
+        st.subheader("🔎 Conferência da planilha")
+        problemas = db.analisar_inconsistencias_excel(arquivo_excel)
+        for problema in problemas:
+            st.warning(problema)
+        arquivo_excel.seek(0)
+
         if st.button("📥 Importar Dados", use_container_width=True, type="primary"):
             with st.spinner("Importando dados..."):
                 resultados = db.importar_excel(arquivo_excel)
@@ -556,5 +693,3 @@ elif pagina == "📄 Gerar Relatórios":
                     mime="text/csv"
                 )
         
-        
-
