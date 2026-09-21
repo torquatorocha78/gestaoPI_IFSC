@@ -264,7 +264,8 @@ def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
         "linguagem": dados.get("linguagem"),
         "campo_aplicacao": dados.get("campo_aplicacao"),
         "tipo_programa": dados.get("tipo_programa"),
-        # Dados FORMICT mantidos para compatibilidade/importação; não são mais editados no formulário.
+        # Novos campos FORMICT
+        "inventores_cpf": dados.get("inventores_cpf"),
         "trl": dados.get("trl"),
         "observacoes_formict": dados.get("observacoes_formict"),
         "cnae_secao": dados.get("cnae_secao"),
@@ -519,88 +520,21 @@ def deletar_patente(patente_id: Any) -> None:
 
 
 def obter_inventores() -> pd.DataFrame:
-    data = _request(
-        "GET",
-        f"{_endpoint('inventores')}?select=*&order=nome.asc",
-        headers=_headers(),
-    )
+    data = _request("GET", f"{_endpoint('inventores')}?select=*&order=nome.asc", headers=_headers())
     return pd.DataFrame(data or [])
 
 
-def _localizar_inventor_id(nome: Optional[str] = None, cpf: Optional[str] = None) -> Optional[int]:
+def adicionar_inventor(nome: str, cpf: Optional[str] = None, endereco: Optional[str] = None,
+                        instituicao: Optional[str] = None, telefone: Optional[str] = None,
+                        email: Optional[str] = None) -> Tuple[bool, str]:
     try:
-        if cpf:
-            q = quote(str(cpf), safe="")
-            ex = _request(
-                "GET",
-                f"{_endpoint('inventores')}?select=id&cpf=eq.{q}&limit=1",
-                headers=_headers(),
-            )
-        elif nome:
-            q = quote(str(nome), safe="")
-            ex = _request(
-                "GET",
-                f"{_endpoint('inventores')}?select=id&nome=eq.{q}&limit=1",
-                headers=_headers(),
-            )
-        else:
-            return None
-        return int(ex[0]["id"]) if ex else None
-    except Exception:
-        return None
-
-
-def adicionar_inventor(
-    nome: str,
-    cpf: Optional[str] = None,
-    nacionalidade: Optional[str] = None,
-    qualificacao: Optional[str] = None,
-    afiliacao: Optional[str] = None,
-    endereco_completo: Optional[str] = None,
-    cidade: Optional[str] = None,
-    estado: Optional[str] = None,
-    pais: Optional[str] = None,
-    cep: Optional[str] = None,
-    telefone: Optional[str] = None,
-    email: Optional[str] = None,
-    observacoes: Optional[str] = None,
-    endereco: Optional[str] = None,
-    instituicao: Optional[str] = None,
-) -> Tuple[bool, str]:
-    """Cadastra um inventor com todos os campos da planilha oficial."""
-    try:
-        payload = {
-            "nome": nome,
-            "cpf": cpf,
-            "nacionalidade": nacionalidade,
-            "qualificacao": qualificacao,
-            "afiliacao": afiliacao or instituicao,
-            "endereco_completo": endereco_completo or endereco,
-            "cidade": cidade,
-            "estado": estado,
-            "pais": pais,
-            "cep": cep,
-            "telefone": telefone,
-            "email": email,
-            "observacoes": observacoes,
-            # compatibilidade com versões anteriores:
-            "endereco": endereco_completo or endereco,
-            "instituicao": afiliacao or instituicao,
-        }
-        payload = {
-            k: _valor_limpo(v)
-            for k, v in payload.items()
-            if _valor_limpo(v) is not None
-        }
+        payload = {k: _valor_limpo(v) for k, v in {
+            "nome": nome, "cpf": cpf, "endereco": endereco,
+            "instituicao": instituicao, "telefone": telefone, "email": email
+        }.items() if _valor_limpo(v) is not None}
         if not payload.get("nome"):
             return False, "Nome do inventor é obrigatório."
-
-        _request(
-            "POST",
-            _endpoint("inventores"),
-            headers=_headers("return=minimal"),
-            json=payload,
-        )
+        _request("POST", _endpoint("inventores"), headers=_headers("return=minimal"), json=payload)
         return True, "Inventor cadastrado com sucesso."
     except Exception as exc:
         return False, f"Erro ao cadastrar inventor: {exc}"
@@ -608,23 +542,9 @@ def adicionar_inventor(
 
 def atualizar_inventor(inventor_id: Any, **dados: Any) -> Tuple[bool, str]:
     try:
-        # Não permitir campos inexistentes no schema.
-        permitidos = {
-            "nome", "cpf", "nacionalidade", "qualificacao", "afiliacao",
-            "endereco_completo", "cidade", "estado", "pais", "cep",
-            "telefone", "email", "observacoes", "endereco", "instituicao"
-        }
-        payload = {
-            k: _valor_limpo(v)
-            for k, v in dados.items()
-            if k in permitidos and _valor_limpo(v) is not None
-        }
-        _request(
-            "PATCH",
-            f"{_endpoint('inventores')}?id=eq.{quote(str(inventor_id), safe='')}",
-            headers=_headers("return=minimal"),
-            json=payload,
-        )
+        payload = {k: _valor_limpo(v) for k, v in dados.items() if _valor_limpo(v) is not None}
+        _request("PATCH", f"{_endpoint('inventores')}?id=eq.{quote(str(inventor_id), safe='')}",
+                 headers=_headers("return=minimal"), json=payload)
         return True, "Inventor atualizado com sucesso."
     except Exception as exc:
         return False, f"Erro ao atualizar inventor: {exc}"
@@ -632,73 +552,25 @@ def atualizar_inventor(inventor_id: Any, **dados: Any) -> Tuple[bool, str]:
 
 def excluir_inventor(inventor_id: Any) -> Tuple[bool, str]:
     try:
-        _request(
-            "DELETE",
-            f"{_endpoint('inventores')}?id=eq.{quote(str(inventor_id), safe='')}",
-            headers=_headers("return=minimal"),
-        )
+        _request("DELETE", f"{_endpoint('inventores')}?id=eq.{quote(str(inventor_id), safe='')}",
+                 headers=_headers("return=minimal"))
         return True, "Inventor excluído com sucesso."
     except Exception as exc:
         return False, f"Erro ao excluir inventor: {exc}"
 
 
-def obter_processos_inventor(inventor_id: Any) -> List[str]:
-    """Retorna os processos ligados a um inventor pela tabela N:N."""
-    try:
-        data = _request(
-            "GET",
-            f"{_endpoint('patente_inventor')}?select=numero_patente&inventor_id=eq.{quote(str(inventor_id), safe='')}&order=numero_patente.asc",
-            headers=_headers(),
-        ) or []
-        return [str(x["numero_patente"]) for x in data if x.get("numero_patente")]
-    except Exception:
-        return []
-
-
-def vincular_inventor_pi(numero_patente: str, inventor_id: Any, ordem: Optional[int] = None) -> Tuple[bool, str]:
-    """Cria/atualiza um vínculo PI <-> inventor sem apagar os demais vínculos."""
-    try:
-        if not numero_patente or inventor_id is None:
-            return False, "Processo e inventor são obrigatórios."
-
-        if ordem is None:
-            existentes = _request(
-                "GET",
-                f"{_endpoint('patente_inventor')}?select=ordem&numero_patente=eq.{quote(str(numero_patente), safe='')}&order=ordem.desc&limit=1",
-                headers=_headers(),
-            ) or []
-            ordem = (int(existentes[0].get("ordem") or 0) + 1) if existentes else 1
-
-        payload = {
-            "numero_patente": str(numero_patente),
-            "inventor_id": int(inventor_id),
-            "ordem": int(ordem),
-        }
-        _request(
-            "POST",
-            _endpoint("patente_inventor"),
-            headers=_headers("resolution=merge-duplicates,return=minimal"),
-            json=payload,
-        )
-        return True, "Inventor vinculado à PI."
-    except Exception as exc:
-        return False, f"Erro ao vincular inventor: {exc}"
-
-
 def obter_inventores_pi(numero_patente: str) -> pd.DataFrame:
     if not numero_patente:
         return pd.DataFrame()
-    url = (
-        f"{_endpoint('patente_inventor')}?select=ordem,inventor_id,inventores(*)&"
-        f"numero_patente=eq.{quote(str(numero_patente), safe='')}&order=ordem.asc"
-    )
+    url = (f"{_endpoint('patente_inventor')}?select=ordem,inventor_id,inventores(*)&"
+           f"numero_patente=eq.{quote(str(numero_patente), safe='')}&order=ordem.asc")
     try:
         data = _request("GET", url, headers=_headers()) or []
-        rows = []
+        rows=[]
         for x in data:
-            inv = dict(x.get("inventores") or {})
-            inv["ordem"] = x.get("ordem")
-            inv["inventor_id"] = x.get("inventor_id")
+            inv=x.get("inventores") or {}
+            inv["ordem"]=x.get("ordem")
+            inv["inventor_id"]=x.get("inventor_id")
             rows.append(inv)
         return pd.DataFrame(rows)
     except Exception:
@@ -707,248 +579,66 @@ def obter_inventores_pi(numero_patente: str) -> pd.DataFrame:
 
 def definir_inventores_pi(numero_patente: str, inventor_ids: List[Any]) -> Tuple[bool, str]:
     try:
-        _request(
-            "DELETE",
-            f"{_endpoint('patente_inventor')}?numero_patente=eq.{quote(str(numero_patente), safe='')}",
-            headers=_headers("return=minimal"),
-        )
-        rows = []
+        _request("DELETE", f"{_endpoint('patente_inventor')}?numero_patente=eq.{quote(str(numero_patente), safe='')}",
+                 headers=_headers("return=minimal"))
+        rows=[]
         for ordem, iid in enumerate(inventor_ids, 1):
-            rows.append({
-                "numero_patente": numero_patente,
-                "inventor_id": int(iid),
-                "ordem": ordem,
-            })
+            rows.append({"numero_patente": numero_patente, "inventor_id": int(iid), "ordem": ordem})
         if rows:
-            _request(
-                "POST",
-                _endpoint("patente_inventor"),
-                headers=_headers("resolution=merge-duplicates,return=minimal"),
-                json=rows,
-            )
+            _request("POST", _endpoint("patente_inventor"), headers=_headers("return=minimal"), json=rows)
         return True, "Inventores da PI atualizados."
     except Exception as exc:
         return False, f"Erro ao vincular inventores: {exc}"
 
 
 def importar_inventores_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
-    """
-    Importa a planilha Inventores.xlsx completa.
-
-    Colunas suportadas:
-    Código Pedido, Afiliação, Nome Inventor, CPF, Nacionalidade,
-    Qualificação, Endereço Completo, CIDADE, ESTADO, PAÍS, CEP,
-    Telefone, Observações, e-mail.
-
-    O Código Pedido não é gravado na tabela inventores: ele é usado como
-    chave estrangeira na tabela patente_inventor, formando a relação N:N.
-    """
     try:
-        nome_arquivo = str(getattr(arquivo_excel, "name", "")).lower()
-        if nome_arquivo.endswith(".xls"):
-            df = pd.read_excel(arquivo_excel, engine="xlrd")
-        else:
-            df = pd.read_excel(arquivo_excel, engine="openpyxl")
+        df=pd.read_excel(arquivo_excel)
     except Exception as exc:
         return [("ARQUIVO", False, f"Falha ao ler a planilha: {exc}")]
-
-    colunas = {_normalizar_texto(c): c for c in df.columns}
-
+    cols={_normalizar_texto(c):c for c in df.columns}
     def col(*names):
         for n in names:
-            chave = _normalizar_texto(n)
-            if chave in colunas:
-                return colunas[chave]
+            if _normalizar_texto(n) in cols: return cols[_normalizar_texto(n)]
         return None
-
-    mapa = {
-        "processo": col("código pedido", "codigo pedido", "processo", "pedido", "numero patente"),
-        "afiliacao": col("afiliação", "afiliacao"),
-        "nome": col("nome inventor", "nome"),
-        "cpf": col("cpf"),
-        "nacionalidade": col("nacionalidade"),
-        "qualificacao": col("qualificação", "qualificacao"),
-        "endereco_completo": col("endereço completo", "endereco completo", "endereço", "endereco"),
-        "cidade": col("cidade"),
-        "estado": col("estado"),
-        "pais": col("país", "pais"),
-        "cep": col("cep"),
-        "telefone": col("telefone"),
-        "observacoes": col("observações", "observacoes"),
-        "email": col("e-mail", "email"),
-    }
-
+    mapa={
+        "nome":col("nome"), "cpf":col("cpf"), "endereco":col("endereco","endereço"),
+        "instituicao":col("instituicao","instituição"), "telefone":col("telefone"), "email":col("email")}
     if not mapa["nome"]:
-        return [("PLANILHA", False, "A coluna 'Nome Inventor' é obrigatória.")]
-    if not mapa["processo"]:
-        return [("PLANILHA", False, "A coluna 'Código Pedido' é obrigatória para criar a relação N:N com patentes.")]
-
-    resultados = []
-
-    for idx, row in df.iterrows():
-        linha = idx + 2
-        processo = _valor_limpo(row.get(mapa["processo"])) if mapa["processo"] else None
-        nome = _valor_limpo(row.get(mapa["nome"])) if mapa["nome"] else None
-
+        return [("PLANILHA", False, "A coluna 'Nome' é obrigatória.")]
+    resultados=[]
+    for idx,row in df.iterrows():
+        nome=_valor_limpo(row.get(mapa["nome"]))
         if not nome:
-            resultados.append((f"Linha {linha}", False, "Nome do inventor não informado."))
-            continue
-        if not processo:
-            resultados.append((str(nome), False, "Código Pedido/processo não informado."))
-            continue
-
-        dados = {
-            "nome": nome,
-            "cpf": _valor_limpo(row.get(mapa["cpf"])) if mapa["cpf"] else None,
-            "nacionalidade": _valor_limpo(row.get(mapa["nacionalidade"])) if mapa["nacionalidade"] else None,
-            "qualificacao": _valor_limpo(row.get(mapa["qualificacao"])) if mapa["qualificacao"] else None,
-            "afiliacao": _valor_limpo(row.get(mapa["afiliacao"])) if mapa["afiliacao"] else None,
-            "endereco_completo": _valor_limpo(row.get(mapa["endereco_completo"])) if mapa["endereco_completo"] else None,
-            "cidade": _valor_limpo(row.get(mapa["cidade"])) if mapa["cidade"] else None,
-            "estado": _valor_limpo(row.get(mapa["estado"])) if mapa["estado"] else None,
-            "pais": _valor_limpo(row.get(mapa["pais"])) if mapa["pais"] else None,
-            "cep": _valor_limpo(row.get(mapa["cep"])) if mapa["cep"] else None,
-            "telefone": _valor_limpo(row.get(mapa["telefone"])) if mapa["telefone"] else None,
-            "email": _valor_limpo(row.get(mapa["email"])) if mapa["email"] else None,
-            "observacoes": _valor_limpo(row.get(mapa["observacoes"])) if mapa["observacoes"] else None,
-        }
-
+            resultados.append((f"Linha {idx+2}",False,"Nome não informado.")); continue
+        dados={k:_valor_limpo(row.get(c)) if c else None for k,c in mapa.items()}
+        cpf=dados.get("cpf")
         try:
-            # Primeiro garante que a PI realmente existe.
-            proc = quote(str(processo), safe="")
-            pi = _request(
-                "GET",
-                f"{_endpoint('patentes')}?select=numero_patente&numero_patente=eq.{proc}&limit=1",
-                headers=_headers(),
-            )
-            if not pi:
-                resultados.append((
-                    f"{nome} / {processo}",
-                    False,
-                    "Processo não encontrado na tabela patentes; inventor não foi vinculado."
-                ))
-                continue
-
-            # Localiza pelo CPF quando disponível; caso contrário pelo nome.
-            inventor_id = _localizar_inventor_id(dados["nome"], dados["cpf"])
-
-            payload = {
-                "nome": dados["nome"],
-                "cpf": dados["cpf"],
-                "nacionalidade": dados["nacionalidade"],
-                "qualificacao": dados["qualificacao"],
-                "afiliacao": dados["afiliacao"],
-                "endereco_completo": dados["endereco_completo"],
-                "cidade": dados["cidade"],
-                "estado": dados["estado"],
-                "pais": dados["pais"],
-                "cep": dados["cep"],
-                "telefone": dados["telefone"],
-                "email": dados["email"],
-                "observacoes": dados["observacoes"],
-                # mantém compatibilidade:
-                "endereco": dados["endereco_completo"],
-                "instituicao": dados["afiliacao"],
-            }
-            payload = {
-                k: _valor_limpo(v)
-                for k, v in payload.items()
-                if _valor_limpo(v) is not None
-            }
-
-            if inventor_id:
-                _request(
-                    "PATCH",
-                    f"{_endpoint('inventores')}?id=eq.{inventor_id}",
-                    headers=_headers("return=minimal"),
-                    json=payload,
-                )
-                acao = "Inventor existente atualizado"
+            if cpf:
+                q=quote(str(cpf), safe="")
+                ex=_request("GET",f"{_endpoint('inventores')}?select=id&cpf=eq.{q}&limit=1",headers=_headers())
             else:
-                criado = _request(
-                    "POST",
-                    _endpoint("inventores"),
-                    headers=_headers("return=representation"),
-                    json=payload,
-                ) or []
-                inventor_id = int(criado[0]["id"]) if criado else None
-                if inventor_id is None:
-                    inventor_id = _localizar_inventor_id(dados["nome"], dados["cpf"])
-                acao = "Novo inventor importado"
-
-            if inventor_id is None:
-                raise RuntimeError("Não foi possível obter o ID do inventor.")
-
-            ok_vinc, msg_vinc = vincular_inventor_pi(str(processo), inventor_id)
-            if not ok_vinc:
-                raise RuntimeError(msg_vinc)
-
-            resultados.append((
-                f"{nome} / {processo}",
-                True,
-                f"{acao} e vinculado à PI {processo}."
-            ))
+                q=quote(str(nome), safe="")
+                ex=_request("GET",f"{_endpoint('inventores')}?select=id&nome=eq.{q}&limit=1",headers=_headers())
+            if ex:
+                _request("PATCH",f"{_endpoint('inventores')}?id=eq.{ex[0]['id']}",headers=_headers("return=minimal"),json={k:v for k,v in dados.items() if v is not None})
+                resultados.append((str(nome),True,"Inventor existente atualizado."))
+            else:
+                adicionar_inventor(**dados)
+                resultados.append((str(nome),True,"Novo inventor importado."))
         except Exception as exc:
-            resultados.append((f"{nome} / {processo}", False, str(exc)))
-
+            resultados.append((str(nome),False,str(exc)))
     return resultados
 
 
 def exportar_inventores_excel() -> bytes:
     from io import BytesIO
-
-    df = obter_inventores()
-
-    # Acrescenta os processos vinculados para a exportação.
-    if not df.empty:
-        processos = []
-        for _, row in df.iterrows():
-            processos.append("; ".join(obter_processos_inventor(row["id"])))
-        df["Código Pedido / Processos vinculados"] = processos
-
-    # Ordena as colunas para espelhar a planilha oficial.
-    desejadas = [
-        "Código Pedido / Processos vinculados",
-        "afiliacao",
-        "nome",
-        "cpf",
-        "nacionalidade",
-        "qualificacao",
-        "endereco_completo",
-        "cidade",
-        "estado",
-        "pais",
-        "cep",
-        "telefone",
-        "observacoes",
-        "email",
-    ]
-    existentes = [c for c in desejadas if c in df.columns]
-    if existentes:
-        df = df[existentes]
-
-    # Renomeia para os títulos da planilha.
-    df = df.rename(columns={
-        "Código Pedido / Processos vinculados": "Código Pedido",
-        "afiliacao": "Afiliação",
-        "nome": "Nome Inventor",
-        "cpf": "CPF",
-        "nacionalidade": "Nacionalidade",
-        "qualificacao": "Qualificação",
-        "endereco_completo": "Endereço Completo",
-        "cidade": "CIDADE",
-        "estado": "ESTADO",
-        "pais": "PAÍS",
-        "cep": "CEP",
-        "telefone": "Telefone",
-        "observacoes": "Observações",
-        "email": "e-mail",
-    })
-
-    out = BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Inventores")
+    df=obter_inventores()
+    out=BytesIO()
+    with pd.ExcelWriter(out,engine="openpyxl") as writer:
+        df.to_excel(writer,index=False,sheet_name="Inventores")
     return out.getvalue()
+
 
 def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
     resultados = []
