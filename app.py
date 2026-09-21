@@ -468,33 +468,6 @@ elif pagina == "➕ Adicionar PI":
                     "Atributos Complementares"
                 )
 
-                trl = st.text_input("TRL")
-
-                setor_economico = st.text_input(
-                    "Setor econômico (CNAE / Seção)"
-                )
-
-                cnae_subclassificacao = st.text_input(
-                    "CNAE / Subclassificação"
-                )
-
-                territorio = st.text_input("Território")
-
-                sigilo = st.selectbox(
-                    "Sigilo",
-                    ["Não", "Sim"],
-                )
-
-                cotitularidade = st.selectbox(
-                    "Cotitularidade",
-                    ["Não", "Sim"],
-                )
-
-                cotitulares = st.text_area(
-                    "Cotitulares",
-                    height=80,
-                )
-
         # ----------------------------------------------------
         # ABA 3
         # ----------------------------------------------------
@@ -591,13 +564,6 @@ elif pagina == "➕ Adicionar PI":
                     termo_cessao=termo_cessao,
                     ipc_classificacao=
                         ipc_classificacao,
-                    trl=trl,
-                    cnae_secao=setor_economico,
-                    cnae_subclassificacao=cnae_subclassificacao,
-                    territorio=territorio,
-                    sigilo=sigilo,
-                    cotitularidade=cotitularidade,
-                    cotitulares=cotitulares,
                 )
 
                 if ok:
@@ -924,44 +890,19 @@ elif pagina == "📁 Gerenciar PIs":
                         ),
                     )
 
-                    st.markdown("### 📑 Dados para FORMICT")
+                    st.markdown("### 📑 Dados complementares FORMICT")
 
-                    edit_setor_economico = st.text_input(
-                        "Setor econômico (CNAE / Seção)",
-                        value=text_clean(pi.get("cnae_secao")),
+                    edit_inventores_cpf = st.text_area(
+                        "CPF dos Inventores",
+                        value=text_clean(pi.get("inventores_cpf")),
+                        height=100,
+                        help="Pode ser informado como Nome (CPF); Nome (CPF).",
                     )
 
-                    edit_cnae_sub = st.text_input(
-                        "CNAE / Subclassificação",
-                        value=text_clean(pi.get("cnae_subclassificacao")),
-                    )
-
-                    edit_trl = st.text_input(
-                        "TRL",
-                        value=text_clean(pi.get("trl")),
-                    )
-
-                    edit_territorio = st.text_input(
-                        "Território",
-                        value=text_clean(pi.get("territorio")),
-                    )
-
-                    edit_sigilo = st.selectbox(
-                        "Sigilo",
-                        ["Não", "Sim"],
-                        index=1 if str(pi.get("sigilo") or "").strip().lower() in ("sim", "true", "1", "sigiloso") else 0,
-                    )
-
-                    edit_cotitularidade = st.selectbox(
-                        "Cotitularidade",
-                        ["Não", "Sim"],
-                        index=1 if str(pi.get("cotitularidade") or "").strip().lower() in ("sim", "true", "1") else 0,
-                    )
-
-                    edit_cotitulares = st.text_area(
-                        "Cotitulares",
-                        value=text_clean(pi.get("cotitulares")),
-                        height=80,
+                    edit_observacoes_formict = st.text_area(
+                        "Observações FORMICT",
+                        value=text_clean(pi.get("observacoes_formict")),
+                        height=120,
                     )
 
                 edit_descricao = st.text_area(
@@ -1302,196 +1243,59 @@ elif pagina == "📤 Importar Excel":
 elif pagina == "👥 Inventores":
 
     st.title("👥 Cadastro de Inventores")
-    st.caption(
-        "Cadastro completo conforme a planilha oficial de inventores. "
-        "O Código Pedido é mantido como relação N:N na tabela patente_inventor."
-    )
+    st.caption("Cadastro único de inventores e relacionamento N:N com as PIs.")
 
-    df_processos = db.obter_patentes()
-    processos = (
-        sorted(df_processos["numero_patente"].dropna().astype(str).unique().tolist())
-        if not df_processos.empty and "numero_patente" in df_processos.columns
-        else []
-    )
-
-    tab_cad, tab_imp, tab_exp = st.tabs(
-        ["➕ Cadastro", "📥 Importar planilha", "📤 Exportar"]
-    )
+    tab_cad, tab_imp, tab_exp = st.tabs(["➕ Cadastro", "📥 Importar", "📤 Exportar"])
 
     with tab_cad:
         with st.form("form_inventor"):
-            st.markdown("### Dados do inventor")
-            c1, c2 = st.columns(2)
-
+            c1,c2=st.columns(2)
             with c1:
-                nome_i = st.text_input("Nome Inventor *")
-                cpf_i = st.text_input("CPF")
-                nacionalidade_i = st.text_input("Nacionalidade")
-                qualificacao_i = st.text_input("Qualificação")
-                afiliacao_i = st.text_input("Afiliação")
-
-                endereco_i = st.text_area(
-                    "Endereço Completo",
-                    height=80,
-                )
-                cidade_i = st.text_input("CIDADE")
-                estado_i = st.text_input("ESTADO")
-                pais_i = st.text_input("PAÍS")
-
+                nome_i=st.text_input("Nome *")
+                cpf_i=st.text_input("CPF")
+                instituicao_i=st.text_input("Instituição")
             with c2:
-                cep_i = st.text_input("CEP")
-                telefone_i = st.text_input("Telefone")
-                email_i = st.text_input("e-mail")
-                observacoes_i = st.text_area(
-                    "Observações",
-                    height=80,
-                )
-
-                processos_i = st.multiselect(
-                    "Código Pedido / Processo(s) vinculado(s)",
-                    processos,
-                    help=(
-                        "O processo é gravado na tabela patente_inventor como "
-                        "chave estrangeira para patentes.numero_patente."
-                    ),
-                )
-
-            salvar_i = st.form_submit_button(
-                "💾 Cadastrar inventor",
-                use_container_width=True,
-                type="primary",
-            )
-
+                endereco_i=st.text_input("Endereço")
+                telefone_i=st.text_input("Telefone")
+                email_i=st.text_input("E-mail")
+            salvar_i=st.form_submit_button("💾 Cadastrar inventor", use_container_width=True, type="primary")
             if salvar_i:
-                if not nome_i.strip():
-                    st.error("Informe o Nome Inventor.")
-                else:
-                    ok, msg = db.adicionar_inventor(
-                        nome=nome_i,
-                        cpf=cpf_i,
-                        nacionalidade=nacionalidade_i,
-                        qualificacao=qualificacao_i,
-                        afiliacao=afiliacao_i,
-                        endereco_completo=endereco_i,
-                        cidade=cidade_i,
-                        estado=estado_i,
-                        pais=pais_i,
-                        cep=cep_i,
-                        telefone=telefone_i,
-                        email=email_i,
-                        observacoes=observacoes_i,
-                    )
-                    if not ok:
-                        st.error(msg)
-                    else:
-                        inventor_id = db._localizar_inventor_id(nome_i, cpf_i)
-                        vinculos_ok = True
-                        if inventor_id and processos_i:
-                            for ordem, processo in enumerate(processos_i, 1):
-                                ok_v, msg_v = db.vincular_inventor_pi(
-                                    processo, inventor_id, ordem
-                                )
-                                if not ok_v:
-                                    vinculos_ok = False
-                                    st.error(msg_v)
-
-                        st.success(
-                            msg + (
-                                f" {len(processos_i)} processo(s) vinculado(s)."
-                                if processos_i
-                                else " Nenhum processo foi vinculado."
-                            )
-                        )
-                        if vinculos_ok:
-                            st.rerun()
+                ok,msg=db.adicionar_inventor(nome_i,cpf_i,endereco_i,instituicao_i,telefone_i,email_i)
+                st.success(msg) if ok else st.error(msg)
+                if ok: st.rerun()
 
     with tab_imp:
-        arquivo_inv = st.file_uploader(
-            "Planilha de inventores (.xlsx/.xls)",
-            type=["xlsx", "xls"],
-            key="importacao_inventores",
-        )
-        st.info(
-            "A planilha deve conter: Código Pedido, Afiliação, Nome Inventor, "
-            "CPF, Nacionalidade, Qualificação, Endereço Completo, CIDADE, "
-            "ESTADO, PAÍS, CEP, Telefone, Observações e e-mail."
-        )
-        if arquivo_inv is not None:
-            try:
-                df_preview_inv = pd.read_excel(
-                    arquivo_inv,
-                    engine="xlrd" if str(getattr(arquivo_inv, "name", "")).lower().endswith(".xls") else "openpyxl",
-                )
-                st.success(
-                    f"Planilha válida: {len(df_preview_inv)} registro(s) encontrado(s)."
-                )
-                st.dataframe(
-                    df_preview_inv,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                if st.button(
-                    "📥 Importar inventores e criar vínculos N:N",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    with st.spinner("Importando inventores e relacionando às PIs..."):
-                        resultados = db.importar_inventores_excel(arquivo_inv)
-
-                    ok_count = sum(1 for _, ok, _ in resultados if ok)
-                    erro_count = len(resultados) - ok_count
-
-                    st.success(
-                        f"✅ {ok_count} registro(s) processado(s) com sucesso."
-                    )
-                    if erro_count:
-                        st.warning(
-                            f"⚠️ {erro_count} registro(s) apresentaram erro."
-                        )
-
-                    st.dataframe(
-                        pd.DataFrame(
-                            resultados,
-                            columns=["Inventor / Processo", "Sucesso", "Mensagem"],
-                        ),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-            except Exception as exc:
-                st.error(f"Erro ao ler a planilha de inventores: {exc}")
+        arquivo_inv=st.file_uploader("Planilha de inventores (.xlsx/.xls)", type=["xlsx","xls"], key="importacao_inventores")
+        st.info("Colunas: Nome, CPF, Endereço, Instituição, Telefone, E-mail. CPF é usado para atualizar o cadastro existente.")
+        if arquivo_inv is not None and st.button("📥 Importar inventores", type="primary", use_container_width=True):
+            resultados=db.importar_inventores_excel(arquivo_inv)
+            st.dataframe(pd.DataFrame(resultados,columns=["Inventor","Sucesso","Mensagem"]), use_container_width=True, hide_index=True)
 
     with tab_exp:
-        st.download_button(
-            "📊 Baixar cadastro completo de inventores",
-            db.exportar_inventores_excel(),
-            "inventores_ifsc_completo.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        st.download_button("📊 Baixar cadastro de inventores", db.exportar_inventores_excel(), "inventores_ifsc.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
-    df_inv = db.obter_inventores()
+    df_inv=db.obter_inventores()
     if df_inv.empty:
         st.info("Nenhum inventor cadastrado.")
     else:
-        st.subheader("📋 Inventores cadastrados")
-        colunas_exibir = [
-            c for c in [
-                "id", "nome", "cpf", "nacionalidade", "qualificacao",
-                "afiliacao", "endereco_completo", "cidade", "estado", "pais",
-                "cep", "telefone", "email", "observacoes"
-            ] if c in df_inv.columns
-        ]
-        st.dataframe(
-            df_inv[colunas_exibir],
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(df_inv, use_container_width=True, hide_index=True)
 
-        st.subheader("🔗 Relação PI ↔ Inventores")
-        for _, inv in df_inv.iterrows():
-            processos_inv = db.obter_processos_inventor(inv["id"])
-            st.write(
-                f"**{inv.get('nome', '')}** — "
-                f"{'; '.join(processos_inv) if processos_inv else 'sem PI vinculada'}"
-            )
+# ============================================================
+# ASSISTENTE JURÍDICO NIT
+# ============================================================
+
+elif pagina == "⚖️ Assistente Jurídico NIT":
+
+    assistente_juridico_NIT.render_assistente_juridico()
+
+
+# ============================================================
+# RELATÓRIOS FORMICT
+# ============================================================
+
+elif pagina == "📑 Relatórios FORMICT":
+
+    import formict_report
+    formict_report.render()
+
