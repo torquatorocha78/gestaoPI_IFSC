@@ -50,34 +50,114 @@ def obter_pagamentos(ano=None, modalidade="Todas", status="Todos"):
 
 
 def _export_df(df):
+    colunas = [
+        "Processo", "Título", "Modalidade", "Titular", "Gestor", "Campus",
+        "Status da PI", "Setor econômico", "CNAE / Subclassificação", "TRL",
+        "Território", "Sigilo", "Cotitularidade", "Cotitulares",
+        "Inventores", "Afiliações dos inventores", "Qualificações dos inventores",
+        "Nacionalidades dos inventores", "Cidades dos inventores",
+        "Estados dos inventores", "Países dos inventores", "CEP dos inventores",
+        "Telefones dos inventores", "E-mails dos inventores",
+        "Número do Pagamento", "Descrição", "Valor", "Data do Pagamento",
+        "Ano do Pagamento", "Status do Pagamento"
+    ]
     if df.empty:
-        return pd.DataFrame(columns=[
-            "Processo", "Título", "Modalidade", "Gestor", "Campus",
-            "Número do Pagamento", "Descrição", "Valor", "Data do Pagamento",
-            "Ano do Pagamento", "Status"
-        ])
+        return pd.DataFrame(columns=colunas)
+
+    def c(nome, default=""):
+        return df[nome] if nome in df.columns else default
+
     return pd.DataFrame({
-        "Processo": df["numero_patente"],
-        "Título": df["titulo"],
-        "Modalidade": df["modalidade_pi"],
-        "Gestor": df["gestor"],
-        "Campus": df["campus"],
-        "Número do Pagamento": df["numero_anuidade"],
-        "Descrição": df["descricao_pagamento"],
-        "Valor": df["valor"],
-        "Data do Pagamento": df["data_pagamento"],
-        "Ano do Pagamento": df["ano_pagamento"],
-        "Status": df["status_pagamento"],
+        "Processo": c("numero_patente"),
+        "Título": c("titulo"),
+        "Modalidade": c("modalidade_pi"),
+        "Titular": c("titular"),
+        "Gestor": c("gestor"),
+        "Campus": c("campus"),
+        "Status da PI": c("status_pi"),
+        "Setor econômico": c("cnae_secao"),
+        "CNAE / Subclassificação": c("cnae_subclassificacao"),
+        "TRL": c("trl"),
+        "Território": c("territorio"),
+        "Sigilo": c("sigilo"),
+        "Cotitularidade": c("cotitularidade"),
+        "Cotitulares": c("cotitulares"),
+        "Inventores": c("inventores"),
+        "Afiliações dos inventores": c("inventores_afiliacoes"),
+        "Qualificações dos inventores": c("inventores_qualificacoes"),
+        "Nacionalidades dos inventores": c("inventores_nacionalidades"),
+        "Cidades dos inventores": c("inventores_cidades"),
+        "Estados dos inventores": c("inventores_estados"),
+        "Países dos inventores": c("inventores_paises"),
+        "CEP dos inventores": c("inventores_ceps"),
+        "Telefones dos inventores": c("inventores_telefones"),
+        "E-mails dos inventores": c("inventores_emails"),
+        "Número do Pagamento": c("numero_anuidade"),
+        "Descrição": c("descricao_pagamento"),
+        "Valor": c("valor"),
+        "Data do Pagamento": c("data_pagamento"),
+        "Ano do Pagamento": c("ano_pagamento"),
+        "Status do Pagamento": c("status_pagamento"),
     })
 
 
+def obter_inventores_detalhados(processos):
+    """Retorna a ficha N:N dos inventores das PIs selecionadas."""
+    if not processos:
+        return pd.DataFrame()
+
+    dados = []
+    for processo in processos:
+        try:
+            df = db.obter_inventores_pi(str(processo))
+            if not df.empty:
+                df.insert(0, "numero_patente", str(processo))
+                dados.append(df)
+        except Exception:
+            pass
+
+    if not dados:
+        return pd.DataFrame()
+
+    return pd.concat(dados, ignore_index=True)
+
 def exportar_excel(df):
     output = io.BytesIO()
+    dados = _export_df(df)
+    processos = (
+        df["numero_patente"].dropna().astype(str).unique().tolist()
+        if not df.empty and "numero_patente" in df.columns
+        else []
+    )
+    inventores = obter_inventores_detalhados(processos)
+
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        _export_df(df).to_excel(writer, index=False, sheet_name="FORMICT_Pagamentos")
+        dados.to_excel(writer, index=False, sheet_name="FORMICT_Completo")
+
+        if not inventores.empty:
+            inventores_export = inventores.rename(columns={
+                "numero_patente": "Código Pedido",
+                "nome": "Nome Inventor",
+                "cpf": "CPF",
+                "nacionalidade": "Nacionalidade",
+                "qualificacao": "Qualificação",
+                "afiliacao": "Afiliação",
+                "endereco_completo": "Endereço Completo",
+                "cidade": "CIDADE",
+                "estado": "ESTADO",
+                "pais": "PAÍS",
+                "cep": "CEP",
+                "telefone": "Telefone",
+                "email": "e-mail",
+                "observacoes": "Observações",
+                "ordem": "Ordem",
+            })
+            inventores_export.to_excel(
+                writer, index=False, sheet_name="Inventores"
+            )
+
     output.seek(0)
     return output.getvalue()
-
 
 def exportar_pdf(df, ano=None):
     output = io.BytesIO()
@@ -94,11 +174,11 @@ def exportar_pdf(df, ano=None):
     if dados.empty:
         story.append(Paragraph("Nenhum pagamento encontrado.", styles["Normal"]))
     else:
-        cols=["Processo","Título","Modalidade","Gestor","Número do Pagamento","Valor","Data do Pagamento"]
+        cols=["Processo","Título","Modalidade","Titular","Inventores","Número do Pagamento","Valor","Data do Pagamento"]
         table_data=[[Paragraph(f"<b>{c}</b>", pequeno) for c in cols]]
         for _,r in dados.iterrows():
             table_data.append([Paragraph(_txt(r.get(c)).replace("&","&amp;"), pequeno) for c in cols])
-        table=Table(table_data, repeatRows=1, colWidths=[90,170,65,80,70,65,75])
+        table=Table(table_data, repeatRows=1, colWidths=[85,145,60,110,170,65,65,75])
         table.setStyle(TableStyle([
             ("BACKGROUND",(0,0),(-1,0),colors.lightgrey),
             ("GRID",(0,0),(-1,-1),0.4,colors.grey),
@@ -112,7 +192,7 @@ def exportar_pdf(df, ano=None):
 
 def render():
     st.title("📑 Relatórios FORMICT")
-    st.caption("Relatório baseado exclusivamente nos pagamentos efetivamente registrados nas anuidades.")
+    st.caption("Relatório FORMICT por ano de pagamento, integrando patentes, pagamentos e inventores vinculados pela relação N:N.")
 
     try:
         anos_df = db._request("GET", f"{db._endpoint('vw_formict_pagamentos')}?select=ano_pagamento&order=ano_pagamento.desc",
