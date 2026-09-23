@@ -44,32 +44,138 @@ def _clean_ai_text(text):
     return text.strip()
 
 
+def _is_irrelevant_line(line):
+    """Identifica linhas que normalmente são ruído do formulário.
+    Não remove respostas preenchidas; apenas opções vazias, marcadores e 'Não aplicável'.
+    """
+    x = re.sub(r"\s+", " ", (line or "")).strip()
+    if not x:
+        return True
+    if re.fullmatch(r"[\W_]+", x):
+        return True
+    if re.search(r"\bn[aã]o\s+aplic[aá]vel\b", x, flags=re.I):
+        return True
+    # Caixas/opções claramente não selecionadas.
+    if re.fullmatch(r"(?:\[\s*\]|☐|□|○|◯)\s*", x):
+        return True
+    return False
+
+
+def _extract_relevant_form(form_text):
+    """Filtra o formulário por conteúdo preenchido, sem truncar por posição.
+
+    O formulário continua sendo lido integralmente pelo Python. A redução ocorre
+    por conteúdo: linhas vazias, 'Não aplicável', marcadores de seleção vazios e
+    ruído repetitivo são removidos. Nenhum bloco é cortado por estar no meio do PDF.
+    """
+    pages = re.split(r"(?=\[PÁGINA\s+\d+\])", form_text or "")
+    kept_pages = []
+    seen = set()
+    for page in pages:
+        lines = []
+        for raw in page.splitlines():
+            line = re.sub(r"[ \t]+", " ", raw).strip()
+            if _is_irrelevant_line(line):
+                continue
+            # Remove duplicações consecutivas comuns em PDFs de formulário.
+            key = re.sub(r"\s+", " ", line).lower()
+            if key in seen and len(key) > 40:
+                continue
+            seen.add(key)
+            lines.append(line)
+        if lines:
+            kept_pages.append("\n".join(lines))
+
+    cleaned = "\n\n".join(kept_pages).strip()
+    # Compressão adicional sem descartar conteúdo: linhas muito longas continuam completas.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
+def _bounded(text, max_chars):
+    """Limite de segurança. Só é usado como último recurso, por blocos inteiros."""
+    text = text or ""
+    if len(text) <= max_chars:
+        return text
+    pages = re.split(r"(?=\[PÁGINA\s+\d+\])", text)
+    out = []
+    total = 0
+    for page in pages:
+        if not page.strip():
+            continue
+        if total + len(page) > max_chars:
+            break
+        out.append(page)
+        total += len(page)
+    return "\n\n".join(out).strip()
+
+def _groq_request(api_key, messages, max_tokens):
+    response = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": MODEL,
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+            "messages": messages,
+        },
+        timeout=120,
+    )
+    if response.status_code == 413:
+        raise RuntimeError(
+            "A solicitação excedeu o limite de tokens da Groq. O módulo agora trabalha em duas etapas "
+            "com conteúdo filtrado; verifique o limite TPM da conta Groq se o erro persistir."
+        )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Groq retornou {response.status_code}: {response.text}")
+    return _clean_ai_text(response.json()["choices"][0]["message"]["content"])
+
+
 def _call_groq(form_text, meeting_notes):
     api_key = _secret("GROQ_API_KEY")
     if not api_key:
         raise RuntimeError("GROQ_API_KEY não configurada nos Secrets do Streamlit.")
 
-    system = """
+    # ETAPA 1: o PDF inteiro é lido localmente e reduzido por conteúdo, não por posição.
+    relevant = _extract_relevant_form(form_text)
+    relevant_for_ai = _bounded(relevant, 9000)
+
+    extraction_system = """
+Você é um extrator de informações para o NIT/IFSC.
+Extraia SOMENTE fatos explicitamente preenchidos no formulário de Notificação de Criação/Invenção.
+Ignore campos vazios, 'Não aplicável', opções não selecionadas e instruções do formulário.
+Não faça análise jurídica, não invente nada e não complete lacunas.
+Organize em tópicos curtos: identificação, tecnologia/objeto, inventores, titularidade,
+financiamento, divulgação, estágio de desenvolvimento, características técnicas,
+aplicações e quaisquer outras informações efetivamente preenchidas.
+Se um tópico não estiver informado, não o inclua.
+Preserve nomes, datas e percentuais exatamente como aparecem.
+"""
+    extraction_user = f"FORMULÁRIO FILTRADO POR CONTEÚDO:\n{relevant_for_ai}"
+    fatos = _groq_request(
+        api_key,
+        [{"role": "system", "content": extraction_system}, {"role": "user", "content": extraction_user}],
+        max_tokens=1200,
+    )
+
+    # ETAPA 2: síntese do parecer. A segunda chamada recebe apenas fatos estruturados
+    # e as observações da reunião, evitando reenviar as 34 páginas.
+    final_system = """
 Você é um assistente técnico do Núcleo de Inovação Tecnológica – NIT/IFSC.
 Elabore uma MINUTA DE PARECER TÉCNICO DE AVALIAÇÃO DE TECNOLOGIA / PATENTEABILIDADE.
 
 REGRAS OBRIGATÓRIAS:
-1. Use somente informações efetivamente presentes no formulário e nas observações da reunião.
-2. Ignore completamente campos vazios e campos marcados como 'Não aplicável'.
-3. Não mencione que campos estavam vazios ou como 'Não aplicável'.
-4. Não invente nomes, datas, percentuais, resultados, TRL, empresas, documentos de anterioridade,
-   artigos de lei, testes ou características técnicas que não estejam nas fontes fornecidas.
-5. As observações da reunião são informações internas do NIT e devem ser usadas para enriquecer
-   a análise final quando pertinentes; não trate como fatos externos verificados.
-6. Preserve a terminologia, a organização e o nível de detalhe do modelo NIT/IFSC.
-7. Quando uma conclusão jurídica depender de pesquisa oficial do INPI, deixe isso expressamente
-   como ressalva, sem afirmar resultado de busca que não foi fornecido.
-8. Diferencie claramente dados fornecidos pelo inventor/NIT de conclusões técnicas preliminares.
-9. Não crie uma tabela de anterioridade com documentos fictícios. Só inclua documentos de anterioridade
-   se eles constarem das fontes fornecidas.
-10. Gere texto profissional, objetivo e pronto para revisão do servidor do NIT.
+1. Use somente os fatos extraídos do formulário e as observações da reunião fornecidas abaixo.
+2. Ignore lacunas; não invente nomes, datas, percentuais, TRL, empresas, anterioridades,
+artigos de lei, testes ou características técnicas.
+3. Observações da reunião são subsídio interno do NIT e não equivalem a fonte externa verificada.
+4. Preserve a terminologia e a organização do modelo NIT/IFSC.
+5. Quando depender de pesquisa oficial do INPI, registre isso como ressalva.
+6. Não crie tabela de anterioridade sem documentos fornecidos.
+7. Diferencie fatos fornecidos de conclusões técnicas preliminares.
+8. Não force uma seção sem informação suficiente.
 
-ESTRUTURA A SER SEGUIDA, quando houver informação suficiente:
+ESTRUTURA:
 PARECER TÉCNICO DE AVALIAÇÃO DE TECNOLOGIA – NIT/IFSC
 I – Identificação
 II – Descrição da tecnologia
@@ -81,37 +187,22 @@ VII – Aspectos de propriedade intelectual
 VIII – Riscos e recomendações
 IX – Conclusão
 PARECER DO NIT
-
-Não force uma seção apenas para preencher o modelo. Se não houver conteúdo suficiente para uma
-seção, não invente conteúdo; omita a seção ou registre somente o que for sustentado pelas fontes.
 """
+    notes = _bounded(_extract_relevant_form(meeting_notes or ""), 5000)
+    final_user = f"""
+FATOS EXTRAÍDOS DO FORMULÁRIO:
+{fatos}
 
-    user = f"""
-FORMULÁRIO DE NOTIFICAÇÃO DE CRIAÇÃO/INVENÇÃO:
-{form_text}
+OBSERVAÇÕES DA REUNIÃO / INFORMAÇÕES COMPLEMENTARES DO NIT:
+{notes if notes else '(Nenhuma informação complementar fornecida.)'}
 
-OBSERVAÇÕES DA REUNIÃO COM O INVENTOR / INFORMAÇÕES COMPLEMENTARES DO NIT:
-{meeting_notes.strip() if meeting_notes.strip() else '(Nenhuma informação complementar fornecida.)'}
-
-Elabore a minuta final do parecer seguindo as regras e a estrutura acima.
+Elabore a minuta final do parecer.
 """
-
-    response = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": MODEL,
-            "temperature": 0.1,
-            "max_tokens": 10000,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        },
-        timeout=120,
+    return _groq_request(
+        api_key,
+        [{"role": "system", "content": final_system}, {"role": "user", "content": final_user}],
+        max_tokens=1800,
     )
-    if response.status_code >= 400:
-        raise RuntimeError(f"Groq retornou {response.status_code}: {response.text}")
-    data = response.json()
-    return _clean_ai_text(data["choices"][0]["message"]["content"])
-
 
 def _add_markdown_like(doc, text):
     for raw in text.splitlines():
