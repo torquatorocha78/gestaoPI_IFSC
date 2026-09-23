@@ -283,32 +283,8 @@ Também existem views SQL para facilitar consultas e geração de relatórios.
 
 A vantagem é que os dados ficam centralizados e podem ser acessados pelo sistema sem depender de uma base SQLite instalada localmente.
 
-10. Fluxo geral do sistema
-                    GESTÃO DE PI – IFSC
-                           │
-          ┌────────────────┴────────────────┐
-          │                                 │
-     Gestão das PIs                   Inteligência Artificial
-          │                                 │
-    ┌─────┼─────┐                    ┌──────┴──────┐
-    │     │     │                    │             │
- Patentes DI  Software          Assistente    Parecer de
-    │     │     │                Jurídico    Patenteabilidade
-    └─────┼─────┘                    │             │
-          │                           │             │
-          ▼                           ▼             ▼
-   Obrigações/Pagamentos        Análise       Formulário +
-          │                     jurídica      reunião NIT
-          ▼                                         │
-      Relatórios                                    ▼
-          │                                    Análise IA
-          │                                         │
-          └──────────────┐                          ▼
-                         │                    Parecer técnico
-                         ▼                          │
-                   SUPABASE /                      ▼
-                  PostgreSQL                  Histórico
-11. Principal ganho institucional
+
+12. Principal ganho institucional
 
 Do ponto de vista do NIT, o sistema transforma informações que normalmente ficam dispersas em planilhas, documentos, PDFs e análises individuais em uma estrutura centralizada.
 
