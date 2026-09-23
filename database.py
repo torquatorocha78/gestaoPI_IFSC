@@ -869,3 +869,52 @@ def obter_obrigacoes_ativo(ativo_id: Any = None) -> pd.DataFrame:
         raise RuntimeError(
             f"Não foi possível carregar as obrigações da PI: {exc}"
         ) from exc
+
+
+# ============================================================
+# PARECERES DE PATENTEABILIDADE – HISTÓRICO
+# ============================================================
+def registrar_parecer_patenteabilidade(
+    numero_patente=None,
+    documento_nome=None,
+    formulario_extraido=None,
+    observacoes_reuniao=None,
+    parecer_gerado=None,
+    modelo=None,
+):
+    try:
+        payload = {
+            "numero_patente": _valor_limpo(numero_patente),
+            "documento_nome": _valor_limpo(documento_nome),
+            "formulario_extraido": _valor_limpo(formulario_extraido),
+            "observacoes_reuniao": _valor_limpo(observacoes_reuniao),
+            "parecer_gerado": _valor_limpo(parecer_gerado),
+            "modelo": _valor_limpo(modelo),
+        }
+        payload = {k:v for k,v in payload.items() if v is not None}
+        _request("POST", _endpoint("pareceres_patenteabilidade"), headers=_headers("return=minimal"), json=payload)
+        return True, "Parecer de patenteabilidade salvo no histórico do Supabase."
+    except Exception as exc:
+        return False, f"Erro ao salvar parecer no histórico: {exc}"
+
+
+def obter_historico_pareceres_patenteabilidade(limite=100, numero_patente=None):
+    try:
+        limite = max(1, min(int(limite), 500))
+        params = f"select=*&order=criado_em.desc&limit={limite}"
+        if numero_patente:
+            params += f"&numero_patente=eq.{quote(str(numero_patente), safe='')}"
+        data = _request("GET", f"{_endpoint('pareceres_patenteabilidade')}?{params}", headers=_headers())
+        return pd.DataFrame(data or [])
+    except Exception as exc:
+        raise RuntimeError(f"Não foi possível consultar o histórico de pareceres: {exc}") from exc
+
+
+def excluir_parecer_patenteabilidade(parecer_id):
+    try:
+        if parecer_id is None or str(parecer_id).strip() == "":
+            return False, "ID do parecer não informado."
+        _request("DELETE", f"{_endpoint('pareceres_patenteabilidade')}?id=eq.{quote(str(parecer_id), safe='')}", headers=_headers("return=minimal"))
+        return True, "Parecer excluído do histórico."
+    except Exception as exc:
+        return False, f"Erro ao excluir parecer: {exc}"
