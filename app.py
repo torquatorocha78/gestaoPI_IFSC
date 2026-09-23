@@ -5,6 +5,7 @@ from datetime import datetime
 import database as db
 import utils
 import assistente_juridico_NIT
+import parecer_patenteabilidade
 
 
 # ============================================================
@@ -285,8 +286,8 @@ pagina = st.sidebar.radio(
         "➕ Adicionar PI",
         "📁 Gerenciar PIs",
         "📤 Importar Excel",
-        "👥 Inventores",
         "⚖️ Assistente Jurídico NIT",
+        "📝 Parecer de Patenteabilidade – NIT/IFSC",
         "📑 Relatórios FORMICT",
     ],
 )
@@ -750,9 +751,6 @@ elif pagina == "📁 Gerenciar PIs":
                 f"{pi['descricao']}"
             )
 
-        if pi.get("inventores_cpf"):
-            st.info(f"**CPF dos Inventores:** {pi['inventores_cpf']}")
-
         # ----------------------------------------------------
         # INVENTORES VINCULADOS - RELAÇÃO N:N
         # ----------------------------------------------------
@@ -890,20 +888,6 @@ elif pagina == "📁 Gerenciar PIs":
                         ),
                     )
 
-                    st.markdown("### 📑 Dados complementares FORMICT")
-
-                    edit_inventores_cpf = st.text_area(
-                        "CPF dos Inventores",
-                        value=text_clean(pi.get("inventores_cpf")),
-                        height=100,
-                        help="Pode ser informado como Nome (CPF); Nome (CPF).",
-                    )
-
-                    edit_observacoes_formict = st.text_area(
-                        "Observações FORMICT",
-                        value=text_clean(pi.get("observacoes_formict")),
-                        height=120,
-                    )
 
                 edit_descricao = st.text_area(
                     "Resumo / Descrição",
@@ -971,8 +955,6 @@ elif pagina == "📁 Gerenciar PIs":
                             "termo_cessao"
                         ),
                         ipc_classificacao=edit_ipc,
-                        inventores_cpf=edit_inventores_cpf,
-                        observacoes_formict=edit_observacoes_formict,
                     )
 
                     if ok:
@@ -1237,57 +1219,21 @@ elif pagina == "📤 Importar Excel":
 
 
 # ============================================================
-# INVENTORES
-# ============================================================
-
-elif pagina == "👥 Inventores":
-
-    st.title("👥 Cadastro de Inventores")
-    st.caption("Cadastro único de inventores e relacionamento N:N com as PIs.")
-
-    tab_cad, tab_imp, tab_exp = st.tabs(["➕ Cadastro", "📥 Importar", "📤 Exportar"])
-
-    with tab_cad:
-        with st.form("form_inventor"):
-            c1,c2=st.columns(2)
-            with c1:
-                nome_i=st.text_input("Nome *")
-                cpf_i=st.text_input("CPF")
-                instituicao_i=st.text_input("Instituição")
-            with c2:
-                endereco_i=st.text_input("Endereço")
-                telefone_i=st.text_input("Telefone")
-                email_i=st.text_input("E-mail")
-            salvar_i=st.form_submit_button("💾 Cadastrar inventor", use_container_width=True, type="primary")
-            if salvar_i:
-                ok,msg=db.adicionar_inventor(nome_i,cpf_i,endereco_i,instituicao_i,telefone_i,email_i)
-                st.success(msg) if ok else st.error(msg)
-                if ok: st.rerun()
-
-    with tab_imp:
-        arquivo_inv=st.file_uploader("Planilha de inventores (.xlsx/.xls)", type=["xlsx","xls"], key="importacao_inventores")
-        st.info("Colunas: Nome, CPF, Endereço, Instituição, Telefone, E-mail. CPF é usado para atualizar o cadastro existente.")
-        if arquivo_inv is not None and st.button("📥 Importar inventores", type="primary", use_container_width=True):
-            resultados=db.importar_inventores_excel(arquivo_inv)
-            st.dataframe(pd.DataFrame(resultados,columns=["Inventor","Sucesso","Mensagem"]), use_container_width=True, hide_index=True)
-
-    with tab_exp:
-        st.download_button("📊 Baixar cadastro de inventores", db.exportar_inventores_excel(), "inventores_ifsc.xlsx",
-                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-
-    df_inv=db.obter_inventores()
-    if df_inv.empty:
-        st.info("Nenhum inventor cadastrado.")
-    else:
-        st.dataframe(df_inv, use_container_width=True, hide_index=True)
-
-# ============================================================
 # ASSISTENTE JURÍDICO NIT
 # ============================================================
 
 elif pagina == "⚖️ Assistente Jurídico NIT":
 
     assistente_juridico_NIT.render_assistente_juridico()
+
+
+# ============================================================
+# PARECER DE PATENTEABILIDADE – NIT/IFSC
+# ============================================================
+
+elif pagina == "📝 Parecer de Patenteabilidade – NIT/IFSC":
+
+    parecer_patenteabilidade.render()
 
 
 # ============================================================
