@@ -25,9 +25,14 @@ SUPABASE_URL = _get_secret(
     "https://ptxtclyfwlcwqgwzqieu.supabase.co",
 ).rstrip("/")
 
-# Aceita os nomes mais comuns usados no Streamlit/Supabase.
+# O aplicativo roda no servidor (Streamlit), portanto deve preferir uma
+# chave secreta do Supabase. Ela fica SOMENTE nos Secrets do Streamlit
+# e nunca deve ser colocada no GitHub. As chaves publishable/anon ficam
+# apenas como fallback para ambientes ainda não migrados.
 SUPABASE_KEY = (
-    _get_secret("SUPABASE_KEY")
+    _get_secret("SUPABASE_SECRET_KEY")
+    or _get_secret("SUPABASE_SERVICE_ROLE_KEY")  # legado
+    or _get_secret("SUPABASE_KEY")
     or _get_secret("SUPABASE_PUBLISHABLE_KEY")
     or _get_secret("SUPABASE_ANON_KEY")
 )
@@ -421,14 +426,22 @@ def obter_anuidades(patente_id: Any) -> pd.DataFrame:
         return resultado
     resultado["numero_patente"] = patente_id
 
-    # Recupera os registros efetivamente gravados na tabela anuidades.
+    # A tabela public.anuidades usa patente_id como chave estrangeira
+    # para public.patentes.id. O número do processo continua sendo a
+    # chave funcional exibida pelo aplicativo.
+    id_patente = pi.get("id")
+    if id_patente is None:
+        return resultado
+
     try:
         persistidos = _request(
             "GET",
-            f"{SUPABASE_URL}/rest/v1/anuidades?select=*&numero_patente=eq.{quote(str(patente_id), safe='')}&order=numero_anuidade.asc",
+            f"{SUPABASE_URL}/rest/v1/anuidades?select=*&patente_id=eq.{quote(str(id_patente), safe='')}&order=numero_anuidade.asc",
             headers=_headers(),
         )
     except Exception:
+        # O cronograma calculado continua disponível mesmo que a tabela de
+        # pagamentos esteja temporariamente indisponível.
         persistidos = []
 
     if persistidos:
@@ -477,14 +490,25 @@ def atualizar_status_anuidade(
     """Atualiza ou cria o registro da anuidade sem depender de constraint UNIQUE."""
     try:
         filtro_id = quote(str(patente_id), safe="")
+        # O app trabalha com o número do processo; o banco grava a relação
+        # pela FK anuidades.patente_id -> patentes.id.
+        df_patentes = obter_patentes()
+        match = df_patentes[df_patentes["numero_patente"].astype(str) == str(patente_id)]
+        if match.empty:
+            # Permite também receber diretamente o ID interno da patente.
+            match = df_patentes[df_patentes["id"].astype(str) == str(patente_id)]
+        if match.empty:
+            raise RuntimeError(f"PI não encontrada para registrar a anuidade: {patente_id}")
+
+        id_patente = match.iloc[0]["id"]
         existente = _request(
             "GET",
-            f"{SUPABASE_URL}/rest/v1/anuidades?select=id&numero_patente=eq.{filtro_id}&numero_anuidade=eq.{int(numero_anuidade)}&limit=1",
+            f"{SUPABASE_URL}/rest/v1/anuidades?select=id&patente_id=eq.{quote(str(id_patente), safe='')}&numero_anuidade=eq.{int(numero_anuidade)}&limit=1",
             headers=_headers(),
         )
 
         payload = {
-            "numero_patente": patente_id,
+            "patente_id": int(id_patente),
             "numero_anuidade": int(numero_anuidade),
             "status": novo_status,
             "data_pagamento": _parse_data(data_pagamento) if data_pagamento else None,
