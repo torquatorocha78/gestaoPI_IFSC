@@ -1,0 +1,79 @@
+SEGURANÇA DO SUPABASE - GESTÃO DE PI IFSC
+===========================================
+
+1) NO STREAMLIT CLOUD
+---------------------
+Abra os Secrets do aplicativo e adicione:
+
+SUPABASE_URL = "https://ptxtclyfwlcwqgwzqieu.supabase.co"
+SUPABASE_SECRET_KEY = "sb_secret_..."
+SUPABASE_TABLE = "patentes"
+
+Use a SECRET KEY criada em:
+Supabase > Settings > API Keys > Secret keys.
+
+NÃO coloque essa chave no GitHub, neste arquivo ou no código.
+
+O database.py desta versão prioriza SUPABASE_SECRET_KEY.
+
+2) NO SUPABASE
+--------------
+Depois de confirmar que SUPABASE_SECRET_KEY está configurada no
+Streamlit, abra o SQL Editor do projeto:
+
+ptxtclyfwlcwqgwzqieu
+
+Execute:
+
+SQL_SEGURANCA_RLS_GESTAO_PI.sql
+
+O SQL:
+- habilita RLS nas tabelas do schema public;
+- remove acesso direto de anon/authenticated;
+- mantém acesso do service_role usado pela Secret Key;
+- não apaga registros;
+- não recria tabelas;
+- não altera dados de patentes, anuidades, inventores ou histórico.
+
+3) ORDEM IMPORTANTE
+-------------------
+Primeiro configure a SUPABASE_SECRET_KEY no Streamlit.
+Depois execute o SQL de RLS.
+
+Se executar RLS antes de configurar a Secret Key, o aplicativo poderá
+receber erros de permissão porque a chave publishable/anon não terá
+políticas de acesso.
+
+4) PROJETO ANTIGO
+-----------------
+O alerta do projeto "GESTAO PI_tabela inventor"
+(ohgunzmogbchtrurhmic) é separado do projeto atual.
+Não execute neste projeto o SQL destinado ao projeto atual.
+
+5) O QUE FOI CORRIGIDO NO CÓDIGO
+---------------------------------
+- database.py agora prioriza SUPABASE_SECRET_KEY.
+- Mantido fallback para SUPABASE_SERVICE_ROLE_KEY legado.
+- Mantidos fallbacks publishable/anon para compatibilidade temporária.
+- A tabela anuidades é consultada e atualizada usando a coluna
+  numero_patente, consistente com o schema disponível no Supabase.
+- O pagamento e o status "não pagar" são persistidos por numero_patente.
+- Mantido historico_consultas_juridicas como tabela do histórico jurídico.
+- Removido o arquivo duplicado/antigo formict_report (1).py.
+- Mantidos Assistente Jurídico NIT, Parecer de Patenteabilidade e
+  Relatórios FORMICT.
+
+6) TESTE APÓS DEPLOY
+--------------------
+No aplicativo, testar nesta ordem:
+1. Dashboard Patentes
+2. Gerenciar PIs
+3. Abrir uma PI com anuidades
+4. Registrar um pagamento de teste
+5. Histórico do Assistente Jurídico NIT
+6. Parecer de Patenteabilidade
+7. Relatórios FORMICT
+8. Importação Excel
+
+Depois conferir no Supabase se o alerta rls_disabled_in_public foi
+resolvido.
