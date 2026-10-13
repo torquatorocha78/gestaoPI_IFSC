@@ -414,6 +414,8 @@ def obter_anuidades(patente_id: Any) -> pd.DataFrame:
 
     match = df[df["numero_patente"].astype(str) == str(patente_id)]
     if match.empty:
+        match = df[df["id"].astype(str) == str(patente_id)]
+    if match.empty:
         return pd.DataFrame()
 
     pi = match.iloc[0]
@@ -424,19 +426,13 @@ def obter_anuidades(patente_id: Any) -> pd.DataFrame:
     resultado = pd.DataFrame(_calcular_cronograma(data_dep, pi.get("modalidade_pi")))
     if resultado.empty:
         return resultado
-    resultado["numero_patente"] = patente_id
-
-    # A tabela public.anuidades usa patente_id como chave estrangeira
-    # para public.patentes.id. O número do processo continua sendo a
-    # chave funcional exibida pelo aplicativo.
-    id_patente = pi.get("id")
-    if id_patente is None:
-        return resultado
+    numero_patente = str(pi["numero_patente"])
+    resultado["numero_patente"] = numero_patente
 
     try:
         persistidos = _request(
             "GET",
-            f"{SUPABASE_URL}/rest/v1/anuidades?select=*&patente_id=eq.{quote(str(id_patente), safe='')}&order=numero_anuidade.asc",
+            f"{_endpoint('anuidades')}?select=*&numero_patente=eq.{quote(numero_patente, safe='')}&order=numero_anuidade.asc",
             headers=_headers(),
         )
     except Exception:
@@ -489,9 +485,6 @@ def atualizar_status_anuidade(
 ) -> None:
     """Atualiza ou cria o registro da anuidade sem depender de constraint UNIQUE."""
     try:
-        filtro_id = quote(str(patente_id), safe="")
-        # O app trabalha com o número do processo; o banco grava a relação
-        # pela FK anuidades.patente_id -> patentes.id.
         df_patentes = obter_patentes()
         match = df_patentes[df_patentes["numero_patente"].astype(str) == str(patente_id)]
         if match.empty:
@@ -500,15 +493,16 @@ def atualizar_status_anuidade(
         if match.empty:
             raise RuntimeError(f"PI não encontrada para registrar a anuidade: {patente_id}")
 
-        id_patente = match.iloc[0]["id"]
+        numero_patente = str(match.iloc[0]["numero_patente"])
+        filtro_patente = quote(numero_patente, safe="")
         existente = _request(
             "GET",
-            f"{SUPABASE_URL}/rest/v1/anuidades?select=id&patente_id=eq.{quote(str(id_patente), safe='')}&numero_anuidade=eq.{int(numero_anuidade)}&limit=1",
+            f"{_endpoint('anuidades')}?select=id&numero_patente=eq.{filtro_patente}&numero_anuidade=eq.{int(numero_anuidade)}&limit=1",
             headers=_headers(),
         )
 
         payload = {
-            "patente_id": int(id_patente),
+            "numero_patente": numero_patente,
             "numero_anuidade": int(numero_anuidade),
             "status": novo_status,
             "data_pagamento": _parse_data(data_pagamento) if data_pagamento else None,
@@ -520,7 +514,7 @@ def atualizar_status_anuidade(
                 raise RuntimeError("Registro de anuidade encontrado sem ID.")
             _request(
                 "PATCH",
-                f"{SUPABASE_URL}/rest/v1/anuidades?id=eq.{quote(str(registro_id), safe='')}",
+                f"{_endpoint('anuidades')}?id=eq.{quote(str(registro_id), safe='')}",
                 headers=_headers("return=minimal"),
                 json=payload,
             )
@@ -528,7 +522,7 @@ def atualizar_status_anuidade(
             # Cria somente o registro selecionado, preservando o cronograma calculado pelo app.
             _request(
                 "POST",
-                f"{SUPABASE_URL}/rest/v1/anuidades",
+                _endpoint("anuidades"),
                 headers=_headers("return=minimal"),
                 json=payload,
             )
