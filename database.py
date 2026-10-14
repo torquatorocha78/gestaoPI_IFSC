@@ -407,14 +407,16 @@ def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bo
 
 
 def obter_anuidades(patente_id: Any) -> pd.DataFrame:
-    """Retorna o cronograma da PI mesclado com os pagamentos persistidos no Supabase."""
+    """Retorna o cronograma da PI mesclado com os pagamentos persistidos no Supabase.
+
+    A tabela public.anuidades deste projeto relaciona os registros pelo campo
+    numero_patente (número do processo), não por patente_id.
+    """
     df = obter_patentes()
     if df.empty:
         return pd.DataFrame()
 
     match = df[df["numero_patente"].astype(str) == str(patente_id)]
-    if match.empty:
-        match = df[df["id"].astype(str) == str(patente_id)]
     if match.empty:
         return pd.DataFrame()
 
@@ -426,18 +428,18 @@ def obter_anuidades(patente_id: Any) -> pd.DataFrame:
     resultado = pd.DataFrame(_calcular_cronograma(data_dep, pi.get("modalidade_pi")))
     if resultado.empty:
         return resultado
-    numero_patente = str(pi["numero_patente"])
-    resultado["numero_patente"] = numero_patente
+    resultado["numero_patente"] = str(pi.get("numero_patente", patente_id))
 
     try:
         persistidos = _request(
             "GET",
-            f"{_endpoint('anuidades')}?select=*&numero_patente=eq.{quote(numero_patente, safe='')}&order=numero_anuidade.asc",
+            f"{_endpoint('anuidades')}?select=*&numero_patente=eq.{quote(str(pi.get('numero_patente', patente_id)), safe='')}&order=numero_anuidade.asc",
             headers=_headers(),
         )
     except Exception:
-        # O cronograma calculado continua disponível mesmo que a tabela de
-        # pagamentos esteja temporariamente indisponível.
+        # Mantém o cronograma calculado disponível se a tabela estiver
+        # temporariamente indisponível; o registro de pagamentos, porém,
+        # reportará o erro ao usuário.
         persistidos = []
 
     if persistidos:
@@ -483,17 +485,18 @@ def atualizar_status_anuidade(
     novo_status: str,
     data_pagamento: Optional[str] = None,
 ) -> None:
-    """Atualiza ou cria o registro da anuidade sem depender de constraint UNIQUE."""
+    """Atualiza ou cria uma anuidade usando o número do processo da PI."""
     try:
         df_patentes = obter_patentes()
         match = df_patentes[df_patentes["numero_patente"].astype(str) == str(patente_id)]
         if match.empty:
-            # Permite também receber diretamente o ID interno da patente.
-            match = df_patentes[df_patentes["id"].astype(str) == str(patente_id)]
+            # Compatibilidade com chamadas que forneçam o ID interno da PI.
+            if "id" in df_patentes.columns:
+                match = df_patentes[df_patentes["id"].astype(str) == str(patente_id)]
         if match.empty:
             raise RuntimeError(f"PI não encontrada para registrar a anuidade: {patente_id}")
 
-        numero_patente = str(match.iloc[0]["numero_patente"])
+        numero_patente = str(match.iloc[0].get("numero_patente") or patente_id)
         filtro_patente = quote(numero_patente, safe="")
         existente = _request(
             "GET",
@@ -519,7 +522,6 @@ def atualizar_status_anuidade(
                 json=payload,
             )
         else:
-            # Cria somente o registro selecionado, preservando o cronograma calculado pelo app.
             _request(
                 "POST",
                 _endpoint("anuidades"),
@@ -936,3 +938,4 @@ def excluir_parecer_patenteabilidade(parecer_id):
         return True, "Parecer excluído do histórico."
     except Exception as exc:
         return False, f"Erro ao excluir parecer: {exc}"
+
