@@ -5,7 +5,6 @@ from datetime import datetime
 import database as db
 import utils
 import assistente_juridico_NIT
-import parecer_patenteabilidade
 
 
 # ============================================================
@@ -84,7 +83,7 @@ def montar_linhas_dashboard(df_pis, modalidade):
 
     for _, pi in df_pis.iterrows():
 
-        pagamentos = db.obter_anuidades(pi["numero_patente"])
+        pagamentos = db.obter_anuidades(pi["id"])
 
         for _, pgto in pagamentos.iterrows():
 
@@ -287,8 +286,9 @@ pagina = st.sidebar.radio(
         "📁 Gerenciar PIs",
         "📤 Importar Excel",
         "⚖️ Assistente Jurídico NIT",
-        "📝 Parecer de Patenteabilidade – NIT/IFSC",
         "📑 Relatórios FORMICT",
+        "💰 Relatórios de Informações financeiras",
+        "⚖️ Parecer de Patenteabilidade",
     ],
 )
 
@@ -327,30 +327,6 @@ elif pagina == "💻 Dashboard Softwares":
         "💻 Dashboard de Softwares",
         "Software"
     )
-
-    st.divider()
-    st.subheader("📋 Todos os Softwares cadastrados")
-    df_soft = db.obter_patentes()
-    df_soft = df_soft[df_soft["modalidade_pi"].apply(db.normalizar_modalidade) == "Software"].copy()
-    if df_soft.empty:
-        st.info("Nenhum software cadastrado.")
-    else:
-        colunas_soft = [c for c in [
-            "numero_patente", "titulo", "status", "titular", "gestor", "campus",
-            "data_deposito", "data_concessao", "data_publicacao", "linguagem",
-            "campo_aplicacao", "tipo_programa", "trl", "sigilo", "cotitularidade",
-            "cotitulares", "criado_em", "atualizado_em"
-        ] if c in df_soft.columns]
-        tabela_soft = df_soft[colunas_soft].copy()
-        st.dataframe(tabela_soft, use_container_width=True, hide_index=True)
-        csv_soft = tabela_soft.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 Extrair CSV dos Softwares", csv_soft, "softwares_ifsc.csv", "text/csv", use_container_width=True)
-        import io as _io
-        _xlsx = _io.BytesIO()
-        with pd.ExcelWriter(_xlsx, engine="openpyxl") as _writer:
-            tabela_soft.to_excel(_writer, index=False, sheet_name="Softwares")
-        st.download_button("📊 Extrair Excel dos Softwares", _xlsx.getvalue(), "softwares_ifsc.xlsx",
-                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
 
 # ============================================================
@@ -666,7 +642,7 @@ elif pagina == "📁 Gerenciar PIs":
         opcoes = {
             f"{row['numero_patente']} - "
             f"{row.get('titulo') or 'Sem título'}":
-                row["numero_patente"]
+                row["id"]
 
             for _, row in df_filtrado.iterrows()
         }
@@ -679,7 +655,7 @@ elif pagina == "📁 Gerenciar PIs":
         pi_id = opcoes[escolha]
 
         pi = df[
-            df["numero_patente"].astype(str) == str(pi_id)
+            df["id"] == pi_id
         ].iloc[0]
 
         modalidade = db.normalizar_modalidade(
@@ -751,22 +727,8 @@ elif pagina == "📁 Gerenciar PIs":
                 f"{pi['descricao']}"
             )
 
-        # ----------------------------------------------------
-        # INVENTORES VINCULADOS - RELAÇÃO N:N
-        # ----------------------------------------------------
-        with st.expander("👥 Inventores vinculados à PI"):
-            df_inv_all = db.obter_inventores()
-            df_inv_pi = db.obter_inventores_pi(str(pi_id))
-            atuais = set(df_inv_pi["inventor_id"].astype(int).tolist()) if not df_inv_pi.empty and "inventor_id" in df_inv_pi.columns else set()
-            if df_inv_all.empty:
-                st.info("Cadastre ou importe inventores primeiro na aba Inventores.")
-            else:
-                labels = {int(r.id): f"{r.nome} — {r.instituicao or 'Sem instituição'}" for r in df_inv_all.itertuples()}
-                selecionados = st.multiselect("Selecione os inventores desta PI", list(labels), default=[x for x in labels if x in atuais], format_func=lambda x: labels[x])
-                if st.button("💾 Salvar inventores da PI", key=f"salvar_inv_pi_{pi_id}", use_container_width=True):
-                    ok,msg=db.definir_inventores_pi(str(pi_id), selecionados)
-                    st.success(msg) if ok else st.error(msg)
-                    if ok: st.rerun()
+        if pi.get("inventores_cpf"):
+            st.info(f"**CPF dos Inventores:** {pi['inventores_cpf']}")
 
         # ----------------------------------------------------
         # EDITAR PI
@@ -888,6 +850,53 @@ elif pagina == "📁 Gerenciar PIs":
                         ),
                     )
 
+                    st.markdown("### 📑 Dados para o FORMICT")
+
+                    edit_setor_economico = st.text_input(
+                        "Setor Econômico",
+                        value=text_clean(pi.get("cnae_secao")),
+                    )
+                    edit_cnae_subclassificacao = st.text_input(
+                        "Subclassificação CNAE 2.0 IBGE",
+                        value=text_clean(pi.get("cnae_subclassificacao")),
+                    )
+                    edit_territorio = st.text_input(
+                        "Território",
+                        value=text_clean(pi.get("territorio")),
+                    )
+                    edit_tlr = st.text_input(
+                        "TLR",
+                        value=text_clean(pi.get("trl")),
+                    )
+                    edit_cotitularidade = st.text_input(
+                        "Com Cotitularidade",
+                        value=text_clean(pi.get("cotitularidade")),
+                    )
+                    edit_custo_registro = st.number_input(
+                        "Custo de Registro (R$)",
+                        min_value=0.0,
+                        value=float(pi.get("custo_registro") or 0),
+                        step=10.0,
+                    )
+                    edit_cotitulares = st.text_area(
+                        "Cotitulares",
+                        value=text_clean(pi.get("cotitulares")),
+                        height=70,
+                    )
+                    edit_inventores_cpf = st.text_area(
+                        "Inventores (nomes e CPFs, se aplicável)",
+                        value=text_clean(pi.get("inventores_cpf") or pi.get("inventores")),
+                        height=100,
+                        help="Informe os inventores e, se necessário, seus CPFs.",
+                    )
+                    edit_processo_sipac = st.text_input(
+                        "Processo SIPAC",
+                        value=text_clean(pi.get("processo_sipac")),
+                    )
+                    edit_servidor_responsavel = st.text_input(
+                        "Servidor responsável",
+                        value=text_clean(pi.get("servidor_responsavel") or pi.get("gestor")),
+                    )
 
                 edit_descricao = st.text_area(
                     "Resumo / Descrição",
@@ -955,6 +964,16 @@ elif pagina == "📁 Gerenciar PIs":
                             "termo_cessao"
                         ),
                         ipc_classificacao=edit_ipc,
+                        inventores_cpf=edit_inventores_cpf,
+                        cnae_secao=edit_setor_economico,
+                        cnae_subclassificacao=edit_cnae_subclassificacao,
+                        territorio=edit_territorio,
+                        trl=edit_tlr,
+                        cotitularidade=edit_cotitularidade,
+                        custo_registro=edit_custo_registro,
+                        cotitulares=edit_cotitulares,
+                        processo_sipac=edit_processo_sipac,
+                        servidor_responsavel=edit_servidor_responsavel,
                     )
 
                     if ok:
@@ -1046,6 +1065,17 @@ elif pagina == "📁 Gerenciar PIs":
                 hide_index=True,
             )
 
+            st.markdown("#### Dados financeiros do pagamento")
+            fin1, fin2, fin3, fin4 = st.columns(4)
+            with fin1:
+                gru_pagamento = st.text_input("GRU", key=f"gru_{pi_id}")
+            with fin2:
+                valor_pagamento = st.number_input("Valor (R$)", min_value=0.0, value=0.0, step=10.0, key=f"valor_pg_{pi_id}")
+            with fin3:
+                processo_sipac_pagamento = st.text_input("Processo SIPAC do pagamento", key=f"sipac_pg_{pi_id}")
+            with fin4:
+                servidor_responsavel_pagamento = st.text_input("Servidor responsável", value=text_clean(pi.get("servidor_responsavel") or pi.get("gestor")), key=f"responsavel_pg_{pi_id}")
+
             col1, col2, col3, col4 = st.columns(4)
 
             with col1:
@@ -1090,6 +1120,10 @@ elif pagina == "📁 Gerenciar PIs":
                             data_pagamento.strftime(
                                 "%Y-%m-%d"
                             ),
+                            gru=gru_pagamento,
+                            valor_pagamento=valor_pagamento,
+                            processo_sipac=processo_sipac_pagamento,
+                            servidor_responsavel=servidor_responsavel_pagamento,
                         )
 
                         st.success(
@@ -1228,15 +1262,6 @@ elif pagina == "⚖️ Assistente Jurídico NIT":
 
 
 # ============================================================
-# PARECER DE PATENTEABILIDADE – NIT/IFSC
-# ============================================================
-
-elif pagina == "📝 Parecer de Patenteabilidade – NIT/IFSC":
-
-    parecer_patenteabilidade.render()
-
-
-# ============================================================
 # RELATÓRIOS FORMICT
 # ============================================================
 
@@ -1245,3 +1270,19 @@ elif pagina == "📑 Relatórios FORMICT":
     import formict_report
     formict_report.render()
 
+
+
+# ============================================================
+# RELATÓRIOS FINANCEIROS
+# ============================================================
+if pagina == "💰 Relatórios de Informações financeiras":
+    import financial_report
+    financial_report.render()
+
+
+# ============================================================
+# PARECER DE PATENTEABILIDADE
+# ============================================================
+if pagina == "⚖️ Parecer de Patenteabilidade":
+    import parecer_patenteabilidade
+    parecer_patenteabilidade.render()
