@@ -1,6 +1,5 @@
 import os
 import json
-import re
 import unicodedata
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,30 +20,34 @@ def _get_secret(nome: str, padrao: str = "") -> str:
         return padrao
 
 
-def _normalizar_url_supabase(valor: str) -> str:
-    """Aceita a URL do projeto; remove barra final ou /rest/v1 acidental."""
-    url = (valor or "").strip().strip('"').strip("'").rstrip("/")
-    url = re.sub(r"/rest/v1$", "", url, flags=re.I)
-    return url
+# Não usar URL de projeto padrão: isso pode conectar silenciosamente ao banco errado.
+SUPABASE_URL = _get_secret("SUPABASE_URL").strip().rstrip("/")
+if SUPABASE_URL.endswith("/rest/v1"):
+    SUPABASE_URL = SUPABASE_URL[:-len("/rest/v1")].rstrip("/")
 
-
-SUPABASE_URL = _normalizar_url_supabase(_get_secret("SUPABASE_URL"))
-
-# Aceita os nomes mais comuns usados no Streamlit/Supabase.
+# O Streamlit executa no servidor. Para operações de importação/atualização,
+# priorize uma chave administrativa guardada SOMENTE em Streamlit Secrets.
+# Nunca coloque essa chave no GitHub nem em código enviado ao navegador.
 SUPABASE_KEY = (
-    _get_secret("SUPABASE_KEY")
+    _get_secret("SUPABASE_SERVICE_ROLE_KEY")
+    or _get_secret("SUPABASE_SECRET_KEY")
+    or _get_secret("SUPABASE_KEY")
     or _get_secret("SUPABASE_PUBLISHABLE_KEY")
     or _get_secret("SUPABASE_ANON_KEY")
 )
 
-SUPABASE_TABLE = (_get_secret("SUPABASE_TABLE", "patentes") or "patentes").strip().strip('"').strip("'")
-ALLOWED_TABLES = {
-    "patentes", "anuidades", "pareceres_patenteabilidade",
-    "historico_consultas_juridicas"
-}
+SUPABASE_TABLE = _get_secret("SUPABASE_TABLE", "patentes").strip()
 
 
 def _headers(prefer: Optional[str] = None) -> Dict[str, str]:
+    if not SUPABASE_URL:
+        raise RuntimeError(
+            "SUPABASE_URL não configurada. Copie a Project URL em Supabase > Project Settings > API."
+        )
+    if not SUPABASE_KEY:
+        raise RuntimeError(
+            "Chave do Supabase não configurada. Adicione SUPABASE_SERVICE_ROLE_KEY nos Secrets do Streamlit."
+        )
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -56,25 +59,7 @@ def _headers(prefer: Optional[str] = None) -> Dict[str, str]:
 
 
 def _endpoint(table: str = SUPABASE_TABLE) -> str:
-    """Monta endpoints PostgREST sem aceitar caminhos acidentais nos Secrets."""
-    if not SUPABASE_URL or not SUPABASE_URL.startswith(("https://", "http://")):
-        raise RuntimeError(
-            "SUPABASE_URL ausente ou inválida. Informe a URL raiz do projeto, "
-            "por exemplo https://SEU-PROJETO.supabase.co"
-        )
-    if not SUPABASE_KEY:
-        raise RuntimeError(
-            "Chave do Supabase ausente. Configure SUPABASE_PUBLISHABLE_KEY "
-            "ou SUPABASE_ANON_KEY nos Secrets do Streamlit."
-        )
-    nome_tabela = str(table or "").strip().strip("/")
-    if nome_tabela not in ALLOWED_TABLES:
-        raise RuntimeError(
-            f"Nome de tabela Supabase inválido: {nome_tabela!r}. "
-            "Use apenas patentes, anuidades, pareceres_patenteabilidade "
-            "ou historico_consultas_juridicas. Não inclua /rest/v1 na tabela."
-        )
-    return f"{SUPABASE_URL}/rest/v1/{nome_tabela}"
+    return f"{SUPABASE_URL}/rest/v1/{table}"
 
 
 def _supabase_error(response: requests.Response) -> str:
@@ -429,7 +414,16 @@ def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bo
         )
         return True, "Nova PI importada para o SUPABASE"
     except Exception as exc:
-        return False, str(exc)
+        mensagem = str(exc)
+        if "row-level security" in mensagem.lower() or "42501" in mensagem:
+            mensagem = (
+                "O Supabase bloqueou a gravação por Row Level Security (RLS). "
+                "A aplicação está usando uma chave pública/anon. Configure "
+                "SUPABASE_SERVICE_ROLE_KEY nos Secrets do Streamlit com a chave administrativa "
+                "do MESMO projeto Supabase e reinicie o app. Não publique essa chave no GitHub. "
+                f"Detalhe original: {mensagem}"
+            )
+        return False, mensagem
 
 
 def obter_anuidades(patente_id: Any) -> pd.DataFrame:
