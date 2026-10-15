@@ -1,152 +1,120 @@
+"""Relatório FORMICT refeito: campos alinhados à planilha-modelo recebida."""
 import io
 import pandas as pd
 import streamlit as st
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 import database as db
 
+COLUNAS = [
+    ("Processo", "numero_patente"),
+    ("Título", "titulo"),
+    ("Tipo", "modalidade_pi"),
+    ("Status", "status"),
+    ("Sigilo", "sigilo"),
+    ("Setor Econômico", "cnae_secao"),
+    ("Subclassificação CNAE 2.0 IBGE", "cnae_subclassificacao"),
+    ("Território", "territorio"),
+    ("TLR", "trl"),
+    ("Com Cotitularidade", "cotitularidade"),
+    ("Custo de Registro", "custo_registro"),
+    ("Data de depósito", "data_deposito"),
+    ("Cotitulares", "cotitulares"),
+    ("Inventores", "inventores"),
+]
 
-def _txt(v):
-    if v is None:
+def _text(v):
+    if v is None or pd.isna(v):
         return ""
-    try:
-        if pd.isna(v):
-            return ""
-    except Exception:
-        pass
     return str(v).strip()
 
+def _export_frame(df):
+    out = pd.DataFrame()
+    for label, field in COLUNAS:
+        out[label] = df[field] if field in df.columns else ""
+    return out
 
-def _money(v):
+def _date_iso(value):
+    if not _text(value):
+        return None
     try:
-        return float(v or 0)
+        return pd.to_datetime(value, dayfirst=True, errors="raise").strftime("%Y-%m-%d")
     except Exception:
-        return 0.0
-
-
-def _money_br(v):
-    return f"R$ {_money(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-def obter_pagamentos(ano=None, modalidade="Todas", status="Todos"):
-    try:
-        params = "select=*"
-        if ano is not None:
-            params += f"&ano_pagamento=eq.{int(ano)}"
-        data = db._request("GET", f"{db._endpoint('vw_formict_pagamentos')}?{params}&order=data_pagamento.asc",
-                           headers=db._headers())
-        df = pd.DataFrame(data or [])
-    except Exception as exc:
-        raise RuntimeError(f"Não foi possível consultar os pagamentos FORMICT: {exc}") from exc
-
-    if modalidade != "Todas" and not df.empty:
-        df = df[df["modalidade_pi"].astype(str).str.lower() == modalidade.lower()]
-    if status != "Todos" and not df.empty:
-        df = df[df["status_pi"].astype(str).str.lower() == status.lower()]
-    return df
-
-
-def _export_df(df):
-    if df.empty:
-        return pd.DataFrame(columns=[
-            "Processo", "Título", "Modalidade", "Gestor", "Campus",
-            "Número do Pagamento", "Descrição", "Valor", "Data do Pagamento",
-            "Ano do Pagamento", "Status"
-        ])
-    return pd.DataFrame({
-        "Processo": df["numero_patente"],
-        "Título": df["titulo"],
-        "Modalidade": df["modalidade_pi"],
-        "Gestor": df["gestor"],
-        "Campus": df["campus"],
-        "Número do Pagamento": df["numero_anuidade"],
-        "Descrição": df["descricao_pagamento"],
-        "Valor": df["valor"],
-        "Data do Pagamento": df["data_pagamento"],
-        "Ano do Pagamento": df["ano_pagamento"],
-        "Status": df["status_pagamento"],
-    })
-
-
-def exportar_excel(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        _export_df(df).to_excel(writer, index=False, sheet_name="FORMICT_Pagamentos")
-    output.seek(0)
-    return output.getvalue()
-
-
-def exportar_pdf(df, ano=None):
-    output = io.BytesIO()
-    doc = SimpleDocTemplate(output, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
-    styles = getSampleStyleSheet()
-    titulo = ParagraphStyle("Titulo", parent=styles["Title"], alignment=TA_CENTER, fontSize=15)
-    pequeno = ParagraphStyle("Pequeno", parent=styles["BodyText"], fontSize=7, leading=9)
-    story = [Paragraph("FORMICT – PAGAMENTOS DE PROPRIEDADE INTELECTUAL – IFSC", titulo), Spacer(1, 8)]
-    if ano:
-        story.append(Paragraph(f"Ano do pagamento: {ano}", styles["Normal"]))
-    story.append(Paragraph(f"Quantidade de pagamentos: {len(df)}", styles["Normal"]))
-    story.append(Spacer(1, 8))
-    dados = _export_df(df)
-    if dados.empty:
-        story.append(Paragraph("Nenhum pagamento encontrado.", styles["Normal"]))
-    else:
-        cols=["Processo","Título","Modalidade","Gestor","Número do Pagamento","Valor","Data do Pagamento"]
-        table_data=[[Paragraph(f"<b>{c}</b>", pequeno) for c in cols]]
-        for _,r in dados.iterrows():
-            table_data.append([Paragraph(_txt(r.get(c)).replace("&","&amp;"), pequeno) for c in cols])
-        table=Table(table_data, repeatRows=1, colWidths=[90,170,65,80,70,65,75])
-        table.setStyle(TableStyle([
-            ("BACKGROUND",(0,0),(-1,0),colors.lightgrey),
-            ("GRID",(0,0),(-1,-1),0.4,colors.grey),
-            ("VALIGN",(0,0),(-1,-1),"TOP"),
-        ]))
-        story.append(table)
-    doc.build(story)
-    output.seek(0)
-    return output.getvalue()
-
+        return None
 
 def render():
     st.title("📑 Relatórios FORMICT")
-    st.caption("Relatório baseado exclusivamente nos pagamentos efetivamente registrados nas anuidades.")
-
-    try:
-        anos_df = db._request("GET", f"{db._endpoint('vw_formict_pagamentos')}?select=ano_pagamento&order=ano_pagamento.desc",
-                              headers=db._headers())
-        anos = sorted({int(x["ano_pagamento"]) for x in (anos_df or []) if x.get("ano_pagamento") is not None}, reverse=True)
-    except Exception as exc:
-        st.error(str(exc))
+    st.caption("Módulo reconstruído conforme as colunas da planilha FORMICT_Pagamentos fornecida. A chave de identificação é Processo + Data de depósito.")
+    df = db.obter_patentes()
+    if df.empty:
+        st.info("Não há PIs cadastradas no banco.")
         return
 
-    c1,c2,c3=st.columns(3)
-    with c1:
-        ano_label=st.selectbox("Ano do pagamento", ["Todos"]+anos)
-    with c2:
-        modalidade=st.selectbox("Modalidade", ["Todas","Patente","Software","Desenho Industrial"])
-    with c3:
-        status=st.selectbox("Status da PI", ["Todos","Ativo","Patente Concedida","Tramitando Normal","Arquivado","Desistência","Indeferimento"])
-
-    ano=None if ano_label=="Todos" else int(ano_label)
-    rel=obter_pagamentos(ano, modalidade, status)
-
-    m1,m2,m3=st.columns(3)
-    m1.metric("Pagamentos encontrados", len(rel))
-    m2.metric("Valor total", _money_br(rel["valor"].sum()) if not rel.empty else "R$ 0,00")
-    m3.metric("PIs distintas", rel["numero_patente"].nunique() if not rel.empty else 0)
+    st.subheader("Exportar dados FORMICT")
+    out = _export_frame(df)
+    st.dataframe(out, use_container_width=True, hide_index=True)
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        out.to_excel(writer, index=False, sheet_name="FORMICT_Pagamentos")
+    st.download_button(
+        "⬇️ Exportar Excel FORMICT",
+        data=buffer.getvalue(),
+        file_name="Relatorio_FORMICT_IFSC.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
     st.divider()
-    st.subheader("📋 Pagamentos registrados")
-    tabela=_export_df(rel)
-    st.dataframe(tabela, use_container_width=True, hide_index=True)
-
-    b1,b2=st.columns(2)
-    with b1:
-        st.download_button("📊 Baixar Excel", exportar_excel(rel), "formict_pagamentos.xlsx",
-                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-    with b2:
-        st.download_button("📄 Baixar PDF", exportar_pdf(rel, ano), "formict_pagamentos.pdf",
-                           "application/pdf", use_container_width=True)
+    st.subheader("Importar/atualizar dados FORMICT por planilha")
+    st.caption("A planilha precisa conter as colunas Processo e Data de depósito. Campos vazios não apagam os valores existentes.")
+    uploaded = st.file_uploader("Planilha Excel FORMICT", type=["xlsx", "xls"], key="formict_import_novo")
+    if uploaded is not None and st.button("Importar dados FORMICT", key="formict_import_btn"):
+        try:
+            sheet = pd.read_excel(uploaded)
+            normalized = {str(c).strip().casefold(): c for c in sheet.columns}
+            process_col = normalized.get("processo")
+            deposit_col = normalized.get("data de depósito") or normalized.get("data de deposito")
+            if not process_col or not deposit_col:
+                st.error("A planilha precisa conter as colunas 'Processo' e 'Data de depósito'.")
+                return
+            inverse = {label.casefold(): field for label, field in COLUNAS}
+            current = db.obter_patentes()
+            success, errors = 0, []
+            for ix, row in sheet.iterrows():
+                process = _text(row.get(process_col))
+                deposit = _date_iso(row.get(deposit_col))
+                if not process or not deposit:
+                    continue
+                match = current[
+                    (current["numero_patente"].astype(str).str.strip() == process) &
+                    (pd.to_datetime(current["data_deposito"], errors="coerce").dt.strftime("%Y-%m-%d") == deposit)
+                ]
+                if match.empty:
+                    errors.append(f"Linha {ix + 2}: processo/data de depósito não localizado ({process}).")
+                    continue
+                record = match.iloc[0]
+                updates = {}
+                for label, field in COLUNAS:
+                    source = normalized.get(label.casefold())
+                    if source is None:
+                        continue
+                    value = row.get(source)
+                    if pd.isna(value) or _text(value) == "":
+                        continue
+                    if field == "data_deposito":
+                        updates["data_dep"] = _date_iso(value)
+                    elif field == "numero_patente":
+                        updates["numero"] = process
+                    elif field == "custo_registro":
+                        try: updates[field] = float(value)
+                        except Exception: updates[field] = None
+                    else:
+                        updates[field] = value
+                ok, msg = db.atualizar_patente(record["id"], **updates)
+                if ok: success += 1
+                else: errors.append(f"Linha {ix + 2}: {msg}")
+            st.success(f"Importação concluída: {success} PI(s) atualizada(s).")
+            if errors:
+                st.warning("Ocorrências:")
+                for error in errors[:50]:
+                    st.write(f"- {error}")
+        except Exception as exc:
+            st.error(f"Não foi possível importar a planilha: {exc}")
