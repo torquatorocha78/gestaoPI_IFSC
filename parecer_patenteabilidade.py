@@ -340,11 +340,11 @@ def _extract_question_answers(form_text):
             continue
         if ":" not in line:
             continue
-        question, answer = line.split(":", 1)
-        question = question.strip(" \t-•")
-        answer = answer.strip(" \t-•")
-        # PDF de formulário às vezes duplica os dois-pontos no rótulo.
-        answer = answer.lstrip(":").strip()
+        # Em PDFs deste formulário, os rótulos às vezes contêm mais de um ":";
+        # a resposta é o texto depois do último dois-pontos.
+        question, answer = line.rsplit(":", 1)
+        question = question.strip(" \t-•:")
+        answer = answer.strip(" \t-•:")
         if question and answer and not _is_irrelevant_line(answer):
             results.append({"Pergunta": question, "Informação extraída": answer})
     return results
