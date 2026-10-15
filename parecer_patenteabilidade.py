@@ -330,6 +330,26 @@ def _render_history():
     except Exception as exc:
         st.error(f"Não foi possível consultar o histórico no Supabase: {exc}")
 
+
+def _extract_question_answers(form_text):
+    """Extrai pares pergunta/resposta explicitamente preenchidos após ':'."""
+    results = []
+    for raw in (form_text or "").splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        if not line or line.startswith("[PÁGINA"):
+            continue
+        if ":" not in line:
+            continue
+        question, answer = line.split(":", 1)
+        question = question.strip(" \t-•")
+        answer = answer.strip(" \t-•")
+        # PDF de formulário às vezes duplica os dois-pontos no rótulo.
+        answer = answer.lstrip(":").strip()
+        if question and answer and not _is_irrelevant_line(answer):
+            results.append({"Pergunta": question, "Informação extraída": answer})
+    return results
+
+
 def render():
     st.title("⚖️ Parecer de Patenteabilidade – NIT/IFSC")
     st.caption("Analisa o formulário de Notificação de Criação/Invenção e as informações complementares registradas pelo NIT.")
@@ -363,6 +383,20 @@ def render():
         st.success("PDF carregado e texto extraído com sucesso.")
         with st.expander("🔎 Conferir conteúdo extraído do formulário"):
             st.text_area("Conteúdo", form_text, height=300, disabled=True)
+        qa = _extract_question_answers(form_text)
+        if qa:
+            st.subheader("Campos preenchidos extraídos do PDF")
+            st.caption("Somente perguntas com conteúdo após os dois-pontos são exibidas; campos vazios são ignorados.")
+            st.dataframe(qa, use_container_width=True, hide_index=True)
+            import pandas as pd
+            qa_buffer = io.BytesIO()
+            pd.DataFrame(qa).to_excel(qa_buffer, index=False, engine="openpyxl")
+            st.download_button(
+                "⬇️ Baixar perguntas e respostas extraídas (.xlsx)",
+                data=qa_buffer.getvalue(),
+                file_name="Campos_extraidos_notificacao_PI.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
     except Exception as exc:
         st.error(f"Não foi possível ler o PDF: {exc}")
         return
