@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import unicodedata
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,10 +21,14 @@ def _get_secret(nome: str, padrao: str = "") -> str:
         return padrao
 
 
-SUPABASE_URL = _get_secret(
-    "SUPABASE_URL",
-    "https://ptxtclyfwlcwqgwzqieu.supabase.co",
-).rstrip("/")
+def _normalizar_url_supabase(valor: str) -> str:
+    """Aceita a URL do projeto; remove barra final ou /rest/v1 acidental."""
+    url = (valor or "").strip().strip('"').strip("'").rstrip("/")
+    url = re.sub(r"/rest/v1$", "", url, flags=re.I)
+    return url
+
+
+SUPABASE_URL = _normalizar_url_supabase(_get_secret("SUPABASE_URL"))
 
 # Aceita os nomes mais comuns usados no Streamlit/Supabase.
 SUPABASE_KEY = (
@@ -32,7 +37,11 @@ SUPABASE_KEY = (
     or _get_secret("SUPABASE_ANON_KEY")
 )
 
-SUPABASE_TABLE = _get_secret("SUPABASE_TABLE", "patentes")
+SUPABASE_TABLE = (_get_secret("SUPABASE_TABLE", "patentes") or "patentes").strip().strip('"').strip("'")
+ALLOWED_TABLES = {
+    "patentes", "anuidades", "pareceres_patenteabilidade",
+    "historico_consultas_juridicas"
+}
 
 
 def _headers(prefer: Optional[str] = None) -> Dict[str, str]:
@@ -47,7 +56,25 @@ def _headers(prefer: Optional[str] = None) -> Dict[str, str]:
 
 
 def _endpoint(table: str = SUPABASE_TABLE) -> str:
-    return f"{SUPABASE_URL}/rest/v1/{table}"
+    """Monta endpoints PostgREST sem aceitar caminhos acidentais nos Secrets."""
+    if not SUPABASE_URL or not SUPABASE_URL.startswith(("https://", "http://")):
+        raise RuntimeError(
+            "SUPABASE_URL ausente ou inválida. Informe a URL raiz do projeto, "
+            "por exemplo https://SEU-PROJETO.supabase.co"
+        )
+    if not SUPABASE_KEY:
+        raise RuntimeError(
+            "Chave do Supabase ausente. Configure SUPABASE_PUBLISHABLE_KEY "
+            "ou SUPABASE_ANON_KEY nos Secrets do Streamlit."
+        )
+    nome_tabela = str(table or "").strip().strip("/")
+    if nome_tabela not in ALLOWED_TABLES:
+        raise RuntimeError(
+            f"Nome de tabela Supabase inválido: {nome_tabela!r}. "
+            "Use apenas patentes, anuidades, pareceres_patenteabilidade "
+            "ou historico_consultas_juridicas. Não inclua /rest/v1 na tabela."
+        )
+    return f"{SUPABASE_URL}/rest/v1/{nome_tabela}"
 
 
 def _supabase_error(response: requests.Response) -> str:
