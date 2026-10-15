@@ -883,26 +883,12 @@ elif pagina == "📁 Gerenciar PIs":
                         value=text_clean(pi.get("cotitulares")),
                         height=70,
                     )
-                    edit_custo_manutencao = st.number_input(
-                        "Custo total de manutenção do ativo no ano-base (R$)",
-                        min_value=0.0,
-                        value=float(pi.get("custo_manutencao_ano_base") or 0),
-                        step=10.0,
+                    edit_inventores_cpf = st.text_area(
+                        "Inventores (nomes e CPFs, se aplicável)",
+                        value=text_clean(pi.get("inventores_cpf") or pi.get("inventores")),
+                        height=100,
+                        help="Informe os inventores e, se necessário, seus CPFs.",
                     )
-                    edit_ano_base_formict = st.number_input(
-                        "Ano-base FORMICT",
-                        min_value=2000,
-                        max_value=2100,
-                        value=int(pi.get("formict_ano_base") or datetime.now().year),
-                        step=1,
-                    )
-                    data_manutencao_atual = utils._para_data(pi.get("data_manutencao"))
-                    edit_data_manutencao = st.date_input(
-                        "Data da manutenção",
-                        value=data_manutencao_atual,
-                    )
-
-                    st.markdown("### 🧾 Informações administrativas e financeiras")
                     edit_processo_sipac = st.text_input(
                         "Processo SIPAC",
                         value=text_clean(pi.get("processo_sipac")),
@@ -978,15 +964,13 @@ elif pagina == "📁 Gerenciar PIs":
                             "termo_cessao"
                         ),
                         ipc_classificacao=edit_ipc,
+                        inventores_cpf=edit_inventores_cpf,
                         cnae_secao=edit_setor_economico,
                         cnae_subclassificacao=edit_cnae_subclassificacao,
                         territorio=edit_territorio,
                         trl=edit_tlr,
                         cotitularidade=edit_cotitularidade,
                         custo_registro=edit_custo_registro,
-                        custo_manutencao_ano_base=edit_custo_manutencao,
-                        formict_ano_base=int(edit_ano_base_formict),
-                        data_manutencao=(edit_data_manutencao.strftime("%Y-%m-%d") if edit_data_manutencao else None),
                         cotitulares=edit_cotitulares,
                         processo_sipac=edit_processo_sipac,
                         servidor_responsavel=edit_servidor_responsavel,
