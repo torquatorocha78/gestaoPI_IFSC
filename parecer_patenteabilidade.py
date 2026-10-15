@@ -138,11 +138,25 @@ def _call_groq(form_text, meeting_notes):
 
     # ETAPA 1: o PDF inteiro é lido localmente e reduzido por conteúdo, não por posição.
     relevant = _extract_relevant_form(form_text)
-    relevant_for_ai = _bounded(relevant, 9000)
+    qa = _extract_question_answers(form_text)
+    if qa:
+        # O conjunto pergunta/resposta é a fonte prioritária para construir o parecer.
+        # Mantém o texto filtrado como complemento para conteúdo narrativo fora dos campos.
+        import json
+        qa_text = json.dumps(qa, ensure_ascii=False, indent=2)
+        relevant_for_ai = _bounded(
+            "PERGUNTAS E RESPOSTAS EXTRAÍDAS DO FORMULÁRIO (FONTE PRIORITÁRIA):\n"
+            + qa_text + "\n\nOUTRO TEXTO PREENCHIDO DO PDF:\n" + relevant,
+            12000,
+        )
+    else:
+        relevant_for_ai = _bounded(relevant, 9000)
 
     extraction_system = """
 Você é um extrator de informações para o NIT/IFSC.
 Extraia SOMENTE fatos explicitamente preenchidos no formulário de Notificação de Criação/Invenção.
+As respostas associadas às perguntas (especialmente o conteúdo após o delimitador :]:) são a fonte prioritária.
+Preserve a associação entre cada pergunta e sua resposta; não trate o texto da pergunta como resposta.
 Ignore campos vazios, 'Não aplicável', opções não selecionadas e instruções do formulário.
 Não faça análise jurídica, não invente nada e não complete lacunas.
 Organize em tópicos curtos: identificação, tecnologia/objeto, inventores, titularidade,
@@ -332,23 +346,82 @@ def _render_history():
 
 
 def _extract_question_answers(form_text):
-    """Extrai pares pergunta/resposta explicitamente preenchidos após ':'."""
+    """Extrai pares pergunta/resposta do PDF respeitando o delimitador do formulário.
+
+    Muitos rótulos têm dois-pontos dentro de colchetes, por exemplo
+    ``[5][Título:]: On parallel hybrid-electric``. Nesse formato, a pergunta
+    termina em ``]:`` e a resposta começa logo depois. Para campos sem colchetes,
+    usa o último dois-pontos da linha para não cortar rótulos que também contenham
+    dois-pontos. Respostas quebradas em várias linhas são reunidas.
+    """
     results = []
-    for raw in (form_text or "").splitlines():
-        line = re.sub(r"\s+", " ", raw).strip()
-        if not line or line.startswith("[PÁGINA"):
-            continue
-        if ":" not in line:
-            continue
-        question, answer = line.split(":", 1)
-        question = question.strip(" \t-•")
-        answer = answer.strip(" \t-•")
-        # PDF de formulário às vezes duplica os dois-pontos no rótulo.
-        answer = answer.lstrip(":").strip()
+    current = None
+
+    def clean(value):
+        value = re.sub(r"\s+", " ", (value or "")).strip()
+        value = value.strip(" \t-•")
+        return value
+
+    def save_current():
+        nonlocal current
+        if not current:
+            return
+        question = clean(current.get("question", ""))
+        answer = clean(current.get("answer", ""))
+        # Retira marcadores de página e não grava campos vazios/não aplicáveis.
+        question = re.sub(r"^\[PÁGINA\s+\d+\]\s*", "", question, flags=re.I)
         if question and answer and not _is_irrelevant_line(answer):
             results.append({"Pergunta": question, "Informação extraída": answer})
-    return results
+        current = None
 
+    for raw in (form_text or "").splitlines():
+        line = re.sub(r"[ \t]+", " ", raw).strip()
+        if not line:
+            continue
+        if re.match(r"^\[PÁGINA\s+\d+\]$", line, flags=re.I):
+            continue
+
+        # Caso prioritário do formulário: o rótulo termina com :], seguido de :.
+        # Ex.: [5][Título:]: On parallel hybrid-electric
+        match = re.search(r"\]:\s*", line)
+        if match:
+            save_current()
+            question = clean(line[:match.start() + 1])
+            answer = clean(line[match.end():])
+            current = {"question": question, "answer": answer}
+            continue
+
+        # Campos de texto simples: usa o último ':' para lidar com rótulos que
+        # possuem dois-pontos internos, como "Invenção: : Patente".
+        if ":" in line:
+            left, right = line.rsplit(":", 1)
+            question, answer = clean(left), clean(right)
+            if question and answer:
+                save_current()
+                current = {"question": question, "answer": answer}
+                continue
+            # Linha de pergunta/rótulo sem resposta; não deve virar resposta.
+            if question and not answer:
+                save_current()
+                current = {"question": question, "answer": ""}
+                continue
+
+        # Texto sem delimitador depois de uma resposta pode ser continuação de
+        # uma resposta que o extrator de texto do PDF quebrou entre linhas.
+        if current and current.get("answer") and not re.match(r"^(?:[A-ZÁÉÍÓÚÂÊÔÃÕÇ][^:]{0,90}:\s*)?$", line):
+            current["answer"] = f"{current['answer']} {line}".strip()
+
+    save_current()
+
+    # Elimina duplicatas exatas, preservando a ordem e respostas distintas.
+    unique = []
+    seen = set()
+    for item in results:
+        key = (item["Pergunta"].casefold(), item["Informação extraída"].casefold())
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
 
 def render():
     st.title("⚖️ Parecer de Patenteabilidade – NIT/IFSC")
