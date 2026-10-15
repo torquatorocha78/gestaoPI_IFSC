@@ -5,20 +5,22 @@ import streamlit as st
 import database as db
 
 COLUNAS = [
-    ("Processo", "numero_patente"),
     ("Título", "titulo"),
     ("Tipo", "modalidade_pi"),
     ("Status", "status"),
     ("Sigilo", "sigilo"),
+    ("Processo", "numero_patente"),
     ("Setor Econômico", "cnae_secao"),
     ("Subclassificação CNAE 2.0 IBGE", "cnae_subclassificacao"),
     ("Território", "territorio"),
     ("TLR", "trl"),
     ("Com Cotitularidade", "cotitularidade"),
     ("Custo de Registro", "custo_registro"),
-    ("Data de depósito", "data_deposito"),
-    ("Cotitulares", "cotitulares"),
-    ("Inventores", "inventores"),
+    ("data de depósito", "data_deposito"),
+    ("Custo total de manutenção do ativo ano-base", "custo_manutencao_ano_base"),
+    ("Data da manutenção", "data_manutencao"),
+    ("cotitulares", "cotitulares"),
+    ("inventores", "inventores"),
 ]
 
 def _text(v):
@@ -69,9 +71,13 @@ def render():
     if uploaded is not None and st.button("Importar dados FORMICT", key="formict_import_btn"):
         try:
             sheet = pd.read_excel(uploaded)
-            normalized = {str(c).strip().casefold(): c for c in sheet.columns}
+            def norm_col(value):
+                import unicodedata
+                text = "".join(ch for ch in unicodedata.normalize("NFKD", str(value)) if not unicodedata.combining(ch))
+                return " ".join(text.strip().casefold().split())
+            normalized = {norm_col(c): c for c in sheet.columns}
             process_col = normalized.get("processo")
-            deposit_col = normalized.get("data de depósito") or normalized.get("data de deposito")
+            deposit_col = normalized.get("data de deposito")
             if not process_col or not deposit_col:
                 st.error("A planilha precisa conter as colunas 'Processo' e 'Data de depósito'.")
                 return
@@ -93,7 +99,7 @@ def render():
                 record = match.iloc[0]
                 updates = {}
                 for label, field in COLUNAS:
-                    source = normalized.get(label.casefold())
+                    source = normalized.get(norm_col(label))
                     if source is None:
                         continue
                     value = row.get(source)
@@ -102,10 +108,14 @@ def render():
                     if field == "data_deposito":
                         updates["data_dep"] = _date_iso(value)
                     elif field == "numero_patente":
-                        updates["numero"] = process
-                    elif field == "custo_registro":
-                        try: updates[field] = float(value)
-                        except Exception: updates[field] = None
+                        continue  # chave de identificação: Processo + Data de depósito
+                    elif field in ("custo_registro", "custo_manutencao_ano_base"):
+                        try:
+                            updates[field] = float(value)
+                        except Exception:
+                            errors.append(f"Linha {ix + 2}: valor inválido em {label}.")
+                    elif field == "data_manutencao":
+                        updates[field] = _date_iso(value)
                     else:
                         updates[field] = value
                 ok, msg = db.atualizar_patente(record["id"], **updates)
