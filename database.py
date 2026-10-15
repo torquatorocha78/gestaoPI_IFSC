@@ -25,14 +25,9 @@ SUPABASE_URL = _get_secret(
     "https://ptxtclyfwlcwqgwzqieu.supabase.co",
 ).rstrip("/")
 
-# O aplicativo roda no servidor (Streamlit), portanto deve preferir uma
-# chave secreta do Supabase. Ela fica SOMENTE nos Secrets do Streamlit
-# e nunca deve ser colocada no GitHub. As chaves publishable/anon ficam
-# apenas como fallback para ambientes ainda não migrados.
+# Aceita os nomes mais comuns usados no Streamlit/Supabase.
 SUPABASE_KEY = (
-    _get_secret("SUPABASE_SECRET_KEY")
-    or _get_secret("SUPABASE_SERVICE_ROLE_KEY")  # legado
-    or _get_secret("SUPABASE_KEY")
+    _get_secret("SUPABASE_KEY")
     or _get_secret("SUPABASE_PUBLISHABLE_KEY")
     or _get_secret("SUPABASE_ANON_KEY")
 )
@@ -198,6 +193,8 @@ def _preparar_patentes(df: pd.DataFrame) -> pd.DataFrame:
         "custo_manutencao_ano_base": ("custo_manutencao_ano_base", "custo manutencao ano base", "custo manutenção ano-base"),
         "data_manutencao": ("data_manutencao", "data manutencao", "data manutenção"),
         "formict_ano_base": ("formict_ano_base", "ano base formict", "ano-base formict"),
+        "processo_sipac": ("processo_sipac", "processo sipac"),
+        "servidor_responsavel": ("servidor_responsavel", "servidor responsável", "servidor responsavel"),
     })
 
     for destino, nomes in aliases.items():
@@ -227,7 +224,7 @@ def init_database() -> None:
 def obter_patentes() -> pd.DataFrame:
     data = _request(
         "GET",
-        f"{_endpoint()}?select=*&order=numero_patente.asc",
+        f"{_endpoint()}?select=*&order=id.asc",
         headers=_headers(),
     )
     df = pd.DataFrame(data or [])
@@ -235,7 +232,7 @@ def obter_patentes() -> pd.DataFrame:
 
 
 def _patente_url(patente_id: Any) -> str:
-    return f"{_endpoint()}?numero_patente=eq.{quote(str(patente_id), safe='')}"
+    return f"{_endpoint()}?id=eq.{quote(str(patente_id), safe='')}"
 
 
 def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
@@ -284,6 +281,8 @@ def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
         "custo_manutencao_ano_base": dados.get("custo_manutencao_ano_base"),
         "data_manutencao": _parse_data(dados.get("data_manutencao")),
         "formict_ano_base": dados.get("formict_ano_base"),
+        "processo_sipac": dados.get("processo_sipac"),
+        "servidor_responsavel": dados.get("servidor_responsavel"),
     }
     return {chave: _valor_limpo(valor) for chave, valor in payload.items() if _valor_limpo(valor) is not None}
 
@@ -307,7 +306,7 @@ def _calcular_cronograma(data_dep: str, modalidade_pi: Any) -> List[Dict[str, An
         fim_ext = ini_ext + pd.DateOffset(months=6)
         cronograma.append({
             "id": f"{numero}",
-            "numero_patente": None,
+            "patente_id": None,
             "numero_anuidade": numero,
             "descricao_pagamento": descricao,
             "data_inicio_ordinario": ini_ord.date().isoformat(),
@@ -407,16 +406,12 @@ def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bo
 
 
 def obter_anuidades(patente_id: Any) -> pd.DataFrame:
-    """Retorna o cronograma da PI mesclado com os pagamentos persistidos no Supabase.
-
-    A tabela public.anuidades deste projeto relaciona os registros pelo campo
-    numero_patente (número do processo), não por patente_id.
-    """
+    """Retorna o cronograma da PI mesclado com os pagamentos persistidos no Supabase."""
     df = obter_patentes()
     if df.empty:
         return pd.DataFrame()
 
-    match = df[df["numero_patente"].astype(str) == str(patente_id)]
+    match = df[df["id"].astype(str) == str(patente_id)]
     if match.empty:
         return pd.DataFrame()
 
@@ -428,18 +423,16 @@ def obter_anuidades(patente_id: Any) -> pd.DataFrame:
     resultado = pd.DataFrame(_calcular_cronograma(data_dep, pi.get("modalidade_pi")))
     if resultado.empty:
         return resultado
-    resultado["numero_patente"] = str(pi.get("numero_patente", patente_id))
+    resultado["patente_id"] = patente_id
 
+    # Recupera os registros efetivamente gravados na tabela anuidades.
     try:
         persistidos = _request(
             "GET",
-            f"{_endpoint('anuidades')}?select=*&numero_patente=eq.{quote(str(pi.get('numero_patente', patente_id)), safe='')}&order=numero_anuidade.asc",
+            f"{SUPABASE_URL}/rest/v1/anuidades?select=*&patente_id=eq.{quote(str(patente_id), safe='')}&order=numero_anuidade.asc",
             headers=_headers(),
         )
     except Exception:
-        # Mantém o cronograma calculado disponível se a tabela estiver
-        # temporariamente indisponível; o registro de pagamentos, porém,
-        # reportará o erro ao usuário.
         persistidos = []
 
     if persistidos:
@@ -484,32 +477,35 @@ def atualizar_status_anuidade(
     numero_anuidade: int,
     novo_status: str,
     data_pagamento: Optional[str] = None,
+    gru: Optional[str] = None,
+    valor_pagamento: Optional[float] = None,
+    processo_sipac: Optional[str] = None,
+    servidor_responsavel: Optional[str] = None,
 ) -> None:
-    """Atualiza ou cria uma anuidade usando o número do processo da PI."""
+    """Atualiza ou cria o registro da anuidade sem depender de constraint UNIQUE."""
     try:
-        df_patentes = obter_patentes()
-        match = df_patentes[df_patentes["numero_patente"].astype(str) == str(patente_id)]
-        if match.empty:
-            # Compatibilidade com chamadas que forneçam o ID interno da PI.
-            if "id" in df_patentes.columns:
-                match = df_patentes[df_patentes["id"].astype(str) == str(patente_id)]
-        if match.empty:
-            raise RuntimeError(f"PI não encontrada para registrar a anuidade: {patente_id}")
-
-        numero_patente = str(match.iloc[0].get("numero_patente") or patente_id)
-        filtro_patente = quote(numero_patente, safe="")
+        filtro_id = quote(str(patente_id), safe="")
         existente = _request(
             "GET",
-            f"{_endpoint('anuidades')}?select=id&numero_patente=eq.{filtro_patente}&numero_anuidade=eq.{int(numero_anuidade)}&limit=1",
+            f"{SUPABASE_URL}/rest/v1/anuidades?select=id&patente_id=eq.{filtro_id}&numero_anuidade=eq.{int(numero_anuidade)}&limit=1",
             headers=_headers(),
         )
 
         payload = {
-            "numero_patente": numero_patente,
+            "patente_id": patente_id,
             "numero_anuidade": int(numero_anuidade),
             "status": novo_status,
             "data_pagamento": _parse_data(data_pagamento) if data_pagamento else None,
         }
+        # Metadados financeiros opcionais; dependem das colunas criadas pelo SQL de atualização.
+        if gru is not None and str(gru).strip():
+            payload["gru"] = str(gru).strip()
+        if valor_pagamento is not None:
+            payload["valor_pagamento"] = float(valor_pagamento)
+        if processo_sipac is not None and str(processo_sipac).strip():
+            payload["processo_sipac"] = str(processo_sipac).strip()
+        if servidor_responsavel is not None and str(servidor_responsavel).strip():
+            payload["servidor_responsavel"] = str(servidor_responsavel).strip()
 
         if existente:
             registro_id = existente[0].get("id")
@@ -517,14 +513,15 @@ def atualizar_status_anuidade(
                 raise RuntimeError("Registro de anuidade encontrado sem ID.")
             _request(
                 "PATCH",
-                f"{_endpoint('anuidades')}?id=eq.{quote(str(registro_id), safe='')}",
+                f"{SUPABASE_URL}/rest/v1/anuidades?id=eq.{quote(str(registro_id), safe='')}",
                 headers=_headers("return=minimal"),
                 json=payload,
             )
         else:
+            # Cria somente o registro selecionado, preservando o cronograma calculado pelo app.
             _request(
                 "POST",
-                _endpoint("anuidades"),
+                f"{SUPABASE_URL}/rest/v1/anuidades",
                 headers=_headers("return=minimal"),
                 json=payload,
             )
@@ -536,128 +533,6 @@ def atualizar_status_anuidade(
 
 def deletar_patente(patente_id: Any) -> None:
     _request("DELETE", _patente_url(patente_id), headers=_headers("return=minimal"))
-
-
-
-def obter_inventores() -> pd.DataFrame:
-    data = _request("GET", f"{_endpoint('inventores')}?select=*&order=nome.asc", headers=_headers())
-    return pd.DataFrame(data or [])
-
-
-def adicionar_inventor(nome: str, cpf: Optional[str] = None, endereco: Optional[str] = None,
-                        instituicao: Optional[str] = None, telefone: Optional[str] = None,
-                        email: Optional[str] = None) -> Tuple[bool, str]:
-    try:
-        payload = {k: _valor_limpo(v) for k, v in {
-            "nome": nome, "cpf": cpf, "endereco": endereco,
-            "instituicao": instituicao, "telefone": telefone, "email": email
-        }.items() if _valor_limpo(v) is not None}
-        if not payload.get("nome"):
-            return False, "Nome do inventor é obrigatório."
-        _request("POST", _endpoint("inventores"), headers=_headers("return=minimal"), json=payload)
-        return True, "Inventor cadastrado com sucesso."
-    except Exception as exc:
-        return False, f"Erro ao cadastrar inventor: {exc}"
-
-
-def atualizar_inventor(inventor_id: Any, **dados: Any) -> Tuple[bool, str]:
-    try:
-        payload = {k: _valor_limpo(v) for k, v in dados.items() if _valor_limpo(v) is not None}
-        _request("PATCH", f"{_endpoint('inventores')}?id=eq.{quote(str(inventor_id), safe='')}",
-                 headers=_headers("return=minimal"), json=payload)
-        return True, "Inventor atualizado com sucesso."
-    except Exception as exc:
-        return False, f"Erro ao atualizar inventor: {exc}"
-
-
-def excluir_inventor(inventor_id: Any) -> Tuple[bool, str]:
-    try:
-        _request("DELETE", f"{_endpoint('inventores')}?id=eq.{quote(str(inventor_id), safe='')}",
-                 headers=_headers("return=minimal"))
-        return True, "Inventor excluído com sucesso."
-    except Exception as exc:
-        return False, f"Erro ao excluir inventor: {exc}"
-
-
-def obter_inventores_pi(numero_patente: str) -> pd.DataFrame:
-    if not numero_patente:
-        return pd.DataFrame()
-    url = (f"{_endpoint('patente_inventor')}?select=ordem,inventor_id,inventores(*)&"
-           f"numero_patente=eq.{quote(str(numero_patente), safe='')}&order=ordem.asc")
-    try:
-        data = _request("GET", url, headers=_headers()) or []
-        rows=[]
-        for x in data:
-            inv=x.get("inventores") or {}
-            inv["ordem"]=x.get("ordem")
-            inv["inventor_id"]=x.get("inventor_id")
-            rows.append(inv)
-        return pd.DataFrame(rows)
-    except Exception:
-        return pd.DataFrame()
-
-
-def definir_inventores_pi(numero_patente: str, inventor_ids: List[Any]) -> Tuple[bool, str]:
-    try:
-        _request("DELETE", f"{_endpoint('patente_inventor')}?numero_patente=eq.{quote(str(numero_patente), safe='')}",
-                 headers=_headers("return=minimal"))
-        rows=[]
-        for ordem, iid in enumerate(inventor_ids, 1):
-            rows.append({"numero_patente": numero_patente, "inventor_id": int(iid), "ordem": ordem})
-        if rows:
-            _request("POST", _endpoint("patente_inventor"), headers=_headers("return=minimal"), json=rows)
-        return True, "Inventores da PI atualizados."
-    except Exception as exc:
-        return False, f"Erro ao vincular inventores: {exc}"
-
-
-def importar_inventores_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
-    try:
-        df=pd.read_excel(arquivo_excel)
-    except Exception as exc:
-        return [("ARQUIVO", False, f"Falha ao ler a planilha: {exc}")]
-    cols={_normalizar_texto(c):c for c in df.columns}
-    def col(*names):
-        for n in names:
-            if _normalizar_texto(n) in cols: return cols[_normalizar_texto(n)]
-        return None
-    mapa={
-        "nome":col("nome"), "cpf":col("cpf"), "endereco":col("endereco","endereço"),
-        "instituicao":col("instituicao","instituição"), "telefone":col("telefone"), "email":col("email")}
-    if not mapa["nome"]:
-        return [("PLANILHA", False, "A coluna 'Nome' é obrigatória.")]
-    resultados=[]
-    for idx,row in df.iterrows():
-        nome=_valor_limpo(row.get(mapa["nome"]))
-        if not nome:
-            resultados.append((f"Linha {idx+2}",False,"Nome não informado.")); continue
-        dados={k:_valor_limpo(row.get(c)) if c else None for k,c in mapa.items()}
-        cpf=dados.get("cpf")
-        try:
-            if cpf:
-                q=quote(str(cpf), safe="")
-                ex=_request("GET",f"{_endpoint('inventores')}?select=id&cpf=eq.{q}&limit=1",headers=_headers())
-            else:
-                q=quote(str(nome), safe="")
-                ex=_request("GET",f"{_endpoint('inventores')}?select=id&nome=eq.{q}&limit=1",headers=_headers())
-            if ex:
-                _request("PATCH",f"{_endpoint('inventores')}?id=eq.{ex[0]['id']}",headers=_headers("return=minimal"),json={k:v for k,v in dados.items() if v is not None})
-                resultados.append((str(nome),True,"Inventor existente atualizado."))
-            else:
-                adicionar_inventor(**dados)
-                resultados.append((str(nome),True,"Novo inventor importado."))
-        except Exception as exc:
-            resultados.append((str(nome),False,str(exc)))
-    return resultados
-
-
-def exportar_inventores_excel() -> bytes:
-    from io import BytesIO
-    df=obter_inventores()
-    out=BytesIO()
-    with pd.ExcelWriter(out,engine="openpyxl") as writer:
-        df.to_excel(writer,index=False,sheet_name="Inventores")
-    return out.getvalue()
 
 
 def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
@@ -856,15 +731,9 @@ def buscar_contexto_ativo_pi(ativo_pi_id: Any = None) -> pd.DataFrame:
         filtro = quote(str(ativo_pi_id), safe="")
         data = _request(
             "GET",
-            f"{_endpoint('patentes')}?select=*&numero_patente=eq.{filtro}&limit=1",
+            f"{_endpoint('patentes')}?select=*&id=eq.{filtro}&limit=1",
             headers=_headers(),
         )
-        if not data:
-            data = _request(
-                "GET",
-                f"{_endpoint('patentes')}?select=*&id=eq.{filtro}&limit=1",
-                headers=_headers(),
-            )
         return _preparar_patentes(pd.DataFrame(data or []))
     except Exception as exc:
         raise RuntimeError(
@@ -881,7 +750,7 @@ def obter_obrigacoes_ativo(ativo_id: Any = None) -> pd.DataFrame:
         filtro = quote(str(ativo_id), safe="")
         data = _request(
             "GET",
-            f"{_endpoint('anuidades')}?select=*&numero_patente=eq.{filtro}&order=numero_anuidade.asc",
+            f"{_endpoint('anuidades')}?select=*&patente_id=eq.{filtro}&order=numero_anuidade.asc",
             headers=_headers(),
         )
         return pd.DataFrame(data or [])
@@ -889,53 +758,3 @@ def obter_obrigacoes_ativo(ativo_id: Any = None) -> pd.DataFrame:
         raise RuntimeError(
             f"Não foi possível carregar as obrigações da PI: {exc}"
         ) from exc
-
-
-# ============================================================
-# PARECERES DE PATENTEABILIDADE – HISTÓRICO
-# ============================================================
-def registrar_parecer_patenteabilidade(
-    numero_patente=None,
-    documento_nome=None,
-    formulario_extraido=None,
-    observacoes_reuniao=None,
-    parecer_gerado=None,
-    modelo=None,
-):
-    try:
-        payload = {
-            "numero_patente": _valor_limpo(numero_patente),
-            "documento_nome": _valor_limpo(documento_nome),
-            "formulario_extraido": _valor_limpo(formulario_extraido),
-            "observacoes_reuniao": _valor_limpo(observacoes_reuniao),
-            "parecer_gerado": _valor_limpo(parecer_gerado),
-            "modelo": _valor_limpo(modelo),
-        }
-        payload = {k:v for k,v in payload.items() if v is not None}
-        _request("POST", _endpoint("pareceres_patenteabilidade"), headers=_headers("return=minimal"), json=payload)
-        return True, "Parecer de patenteabilidade salvo no histórico do Supabase."
-    except Exception as exc:
-        return False, f"Erro ao salvar parecer no histórico: {exc}"
-
-
-def obter_historico_pareceres_patenteabilidade(limite=100, numero_patente=None):
-    try:
-        limite = max(1, min(int(limite), 500))
-        params = f"select=*&order=criado_em.desc&limit={limite}"
-        if numero_patente:
-            params += f"&numero_patente=eq.{quote(str(numero_patente), safe='')}"
-        data = _request("GET", f"{_endpoint('pareceres_patenteabilidade')}?{params}", headers=_headers())
-        return pd.DataFrame(data or [])
-    except Exception as exc:
-        raise RuntimeError(f"Não foi possível consultar o histórico de pareceres: {exc}") from exc
-
-
-def excluir_parecer_patenteabilidade(parecer_id):
-    try:
-        if parecer_id is None or str(parecer_id).strip() == "":
-            return False, "ID do parecer não informado."
-        _request("DELETE", f"{_endpoint('pareceres_patenteabilidade')}?id=eq.{quote(str(parecer_id), safe='')}", headers=_headers("return=minimal"))
-        return True, "Parecer excluído do histórico."
-    except Exception as exc:
-        return False, f"Erro ao excluir parecer: {exc}"
-
