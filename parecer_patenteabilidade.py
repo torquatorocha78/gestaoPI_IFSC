@@ -1,4 +1,5 @@
 import io
+import hashlib
 import os
 import re
 from datetime import datetime
@@ -30,11 +31,58 @@ def _extract_pdf(uploaded_file):
     data = uploaded_file.getvalue()
     reader = PdfReader(io.BytesIO(data))
     pages = []
+    ocr_context = None
     for i, page in enumerate(reader.pages, 1):
         text = page.extract_text() or ""
+        image_ratio = 0.0
+        try:
+            page_width = float(page.mediabox.width)
+            page_height = float(page.mediabox.height)
+            page_area = page_width * page_height
+            image_area = sum(
+                float(image.image.size[0]) * float(image.image.size[1])
+                for image in page.images
+            )
+            image_ratio = image_area / page_area if page_area else 0.0
+        except Exception:
+            pass
+        if (len(text.strip()) < 40 and image_ratio > 0) or (
+            image_ratio >= 0.2 and len(text.strip()) < 2000
+        ):
+            if ocr_context is None:
+                try:
+                    import fitz
+                    import pytesseract
+                    from PIL import Image
+                    ocr_doc = fitz.open(stream=data, filetype="pdf")
+                    ocr_context = (fitz, pytesseract, Image, ocr_doc)
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "O PDF contém páginas digitalizadas e precisa de OCR. Instale PyMuPDF, "
+                        "pytesseract, Pillow e o Tesseract OCR com idioma português."
+                    ) from exc
+            fitz, pytesseract, Image, ocr_doc = ocr_context
+            pix = ocr_doc.load_page(i - 1).get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            image = Image.open(io.BytesIO(pix.tobytes("png")))
+            try:
+                ocr_text = pytesseract.image_to_string(image, lang="por+eng")
+            except Exception as exc:
+                raise RuntimeError(
+                    "Não foi possível executar OCR em português. Verifique se o Tesseract e os "
+                    "pacotes de idioma por/eng estão instalados."
+                ) from exc
+            # Em páginas híbridas, manter texto selecionável e OCR juntos evita
+            # perder respostas manuscritas sobrepostas à estrutura do formulário.
+            if ocr_text.strip() and image_ratio >= 0.2 and len(text.strip()) >= 40:
+                text = f"{text.strip()}\n[LEITURA OCR COMPLEMENTAR]\n{ocr_text.strip()}"
+            elif len(ocr_text.strip()) > len(text.strip()):
+                text = ocr_text
         if text.strip():
             pages.append(f"[PÁGINA {i}]\n{text.strip()}")
-    return "\n\n".join(pages)
+    extracted = "\n\n".join(pages)
+    if not extracted.strip():
+        raise RuntimeError("Não foi possível extrair texto do PDF. Se for uma digitalização, habilite o OCR e tente novamente.")
+    return extracted
 
 
 def _clean_ai_text(text):
@@ -53,7 +101,7 @@ def _is_irrelevant_line(line):
         return True
     if re.fullmatch(r"[\W_]+", x):
         return True
-    if re.search(r"\bn[aã]o\s+aplic[aá]vel\b", x, flags=re.I):
+    if re.fullmatch(r"n[aã]o\s+aplic[aá]vel[.!]?", x, flags=re.I):
         return True
     # Caixas/opções claramente não selecionadas.
     if re.fullmatch(r"(?:\[\s*\]|☐|□|○|◯)\s*", x):
@@ -65,23 +113,17 @@ def _extract_relevant_form(form_text):
     """Filtra o formulário por conteúdo preenchido, sem truncar por posição.
 
     O formulário continua sendo lido integralmente pelo Python. A redução ocorre
-    por conteúdo: linhas vazias, 'Não aplicável', marcadores de seleção vazios e
-    ruído repetitivo são removidos. Nenhum bloco é cortado por estar no meio do PDF.
+    por conteúdo: linhas vazias, respostas isoladas 'Não aplicável' e marcadores
+    vazios são removidos. Nenhum bloco é cortado por estar no meio do PDF.
     """
     pages = re.split(r"(?=\[PÁGINA\s+\d+\])", form_text or "")
     kept_pages = []
-    seen = set()
     for page in pages:
         lines = []
         for raw in page.splitlines():
             line = re.sub(r"[ \t]+", " ", raw).strip()
             if _is_irrelevant_line(line):
                 continue
-            # Remove duplicações consecutivas comuns em PDFs de formulário.
-            key = re.sub(r"\s+", " ", line).lower()
-            if key in seen and len(key) > 40:
-                continue
-            seen.add(key)
             lines.append(line)
         if lines:
             kept_pages.append("\n".join(lines))
@@ -92,22 +134,31 @@ def _extract_relevant_form(form_text):
     return cleaned
 
 
-def _bounded(text, max_chars):
-    """Limite de segurança. Só é usado como último recurso, por blocos inteiros."""
-    text = text or ""
-    if len(text) <= max_chars:
-        return text
-    pages = re.split(r"(?=\[PÁGINA\s+\d+\])", text)
-    out = []
-    total = 0
-    for page in pages:
-        if not page.strip():
-            continue
-        if total + len(page) > max_chars:
-            break
-        out.append(page)
-        total += len(page)
-    return "\n\n".join(out).strip()
+def _split_complete_chunks(text, max_chars=8500):
+    """Divide todo o texto em blocos sem descartar páginas ou linhas finais."""
+    chunks, current, size = [], [], 0
+    for line in (text or "").splitlines():
+        pieces = [line]
+        if len(line) > max_chars:
+            pieces, piece = [], ""
+            for word in line.split():
+                candidate = f"{piece} {word}".strip()
+                if len(candidate) > max_chars and piece:
+                    pieces.append(piece)
+                    piece = word
+                else:
+                    piece = candidate
+            if piece:
+                pieces.append(piece)
+        for part in pieces:
+            if current and size + len(part) + 1 > max_chars:
+                chunks.append("\n".join(current))
+                current, size = [], 0
+            current.append(part)
+            size += len(part) + 1
+    if current:
+        chunks.append("\n".join(current))
+    return [chunk for chunk in chunks if chunk.strip()]
 
 def _groq_request(api_key, messages, max_tokens):
     response = requests.post(
@@ -128,7 +179,8 @@ def _groq_request(api_key, messages, max_tokens):
         )
     if response.status_code >= 400:
         raise RuntimeError(f"Groq retornou {response.status_code}: {response.text}")
-    return _clean_ai_text(response.json()["choices"][0]["message"]["content"])
+    content = response.json()["choices"][0]["message"].get("content") or ""
+    return _clean_ai_text(content)
 
 
 def _call_groq(form_text, meeting_notes):
@@ -136,27 +188,14 @@ def _call_groq(form_text, meeting_notes):
     if not api_key:
         raise RuntimeError("GROQ_API_KEY não configurada nos Secrets do Streamlit.")
 
-    # ETAPA 1: o PDF inteiro é lido localmente e reduzido por conteúdo, não por posição.
+    # ETAPA 1: o PDF inteiro é lido e analisado em blocos para não perder páginas finais.
     relevant = _extract_relevant_form(form_text)
-    qa = _extract_question_answers(form_text)
-    if qa:
-        # O conjunto pergunta/resposta é a fonte prioritária para construir o parecer.
-        # Mantém o texto filtrado como complemento para conteúdo narrativo fora dos campos.
-        import json
-        qa_text = json.dumps(qa, ensure_ascii=False, indent=2)
-        relevant_for_ai = _bounded(
-            "PERGUNTAS E RESPOSTAS EXTRAÍDAS DO FORMULÁRIO (FONTE PRIORITÁRIA):\n"
-            + qa_text + "\n\nOUTRO TEXTO PREENCHIDO DO PDF:\n" + relevant,
-            12000,
-        )
-    else:
-        relevant_for_ai = _bounded(relevant, 9000)
+    if not relevant.strip():
+        raise RuntimeError("O PDF não contém respostas preenchidas que possam ser usadas no parecer.")
 
     extraction_system = """
 Você é um extrator de informações para o NIT/IFSC.
 Extraia SOMENTE fatos explicitamente preenchidos no formulário de Notificação de Criação/Invenção.
-As respostas associadas às perguntas (especialmente o conteúdo após o delimitador :]:) são a fonte prioritária.
-Preserve a associação entre cada pergunta e sua resposta; não trate o texto da pergunta como resposta.
 Ignore campos vazios, 'Não aplicável', opções não selecionadas e instruções do formulário.
 Não faça análise jurídica, não invente nada e não complete lacunas.
 Organize em tópicos curtos: identificação, tecnologia/objeto, inventores, titularidade,
@@ -165,12 +204,26 @@ aplicações e quaisquer outras informações efetivamente preenchidas.
 Se um tópico não estiver informado, não o inclua.
 Preserve nomes, datas e percentuais exatamente como aparecem.
 """
-    extraction_user = f"FORMULÁRIO FILTRADO POR CONTEÚDO:\n{relevant_for_ai}"
-    fatos = _groq_request(
-        api_key,
-        [{"role": "system", "content": extraction_system}, {"role": "user", "content": extraction_user}],
-        max_tokens=1200,
-    )
+    fatos_por_bloco = []
+    chunks = _split_complete_chunks(relevant)
+    for index, chunk in enumerate(chunks, 1):
+        extraction_user = (
+            f"BLOCO {index} DE {len(chunks)} DO FORMULÁRIO. Extraia todos os fatos preenchidos "
+            f"deste bloco, sem inferir respostas de outros blocos:\n{chunk}"
+        )
+        facts = _groq_request(
+            api_key,
+            [{"role": "system", "content": extraction_system}, {"role": "user", "content": extraction_user}],
+            max_tokens=1200,
+        )
+        if facts:
+            fatos_por_bloco.append(f"[FATOS DO BLOCO {index}]\n{facts}")
+    fatos = "\n\n".join(fatos_por_bloco).strip()
+    if not fatos:
+        raise RuntimeError(
+            "A extração não encontrou respostas preenchidas. O parecer não foi gerado para evitar "
+            "um relatório vazio; confira o texto extraído ou use um PDF com texto/OCR legível."
+        )
 
     # ETAPA 2: síntese do parecer. A segunda chamada recebe apenas fatos estruturados
     # e as observações da reunião, evitando reenviar as 34 páginas.
@@ -202,7 +255,7 @@ VIII – Riscos e recomendações
 IX – Conclusão
 PARECER DO NIT
 """
-    notes = _bounded(_extract_relevant_form(meeting_notes or ""), 5000)
+    notes = _extract_relevant_form(meeting_notes or "")
     final_user = f"""
 FATOS EXTRAÍDOS DO FORMULÁRIO:
 {fatos}
@@ -210,13 +263,20 @@ FATOS EXTRAÍDOS DO FORMULÁRIO:
 OBSERVAÇÕES DA REUNIÃO / INFORMAÇÕES COMPLEMENTARES DO NIT:
 {notes if notes else '(Nenhuma informação complementar fornecida.)'}
 
+Use os fatos acima como fonte obrigatória do parecer. Aproveite cada informação preenchida
+na seção correspondente; não substitua os fatos por texto genérico. Se houver lacuna,
+informe a limitação em vez de inventar uma resposta.
+
 Elabore a minuta final do parecer.
 """
-    return _groq_request(
+    parecer = _groq_request(
         api_key,
         [{"role": "system", "content": final_system}, {"role": "user", "content": final_user}],
         max_tokens=1800,
     )
+    if not parecer:
+        raise RuntimeError("A IA retornou um parecer vazio. Tente novamente.")
+    return fatos, parecer
 
 def _add_markdown_like(doc, text):
     for raw in text.splitlines():
@@ -269,13 +329,14 @@ def gerar_docx(parecer):
     return out.getvalue()
 
 
-def _save_history(numero_patente, documento_nome, form_text, notes, parecer):
+def _save_history(numero_patente, documento_nome, form_text, notes, fatos, parecer):
     try:
         payload = {
             "numero_patente": numero_patente or None,
             "documento_nome": documento_nome or None,
             "formulario_extraido": form_text or None,
             "observacoes_reuniao": notes or None,
+            "fatos_extraidos": fatos or None,
             "parecer_gerado": parecer or None,
             "modelo": MODEL,
             "criado_em": datetime.now().isoformat(),
@@ -325,12 +386,15 @@ def _render_history():
                 st.markdown(f"**Modelo de IA:** {row.get('modelo') or '-'}")
                 st.markdown("**Observações da reunião:**")
                 st.write(row.get("observacoes_reuniao") or "Nenhuma observação registrada.")
+                st.markdown("**Fatos extraídos e usados:**")
+                st.markdown(row.get("fatos_extraidos") or "Fatos estruturados não registrados neste parecer.")
                 st.markdown("**Parecer gerado:**")
                 st.markdown(row.get("parecer_gerado") or "-")
                 with st.expander("📄 Resgatar formulário extraído do PDF"):
                     st.text_area("Conteúdo do formulário", row.get("formulario_extraido") or "", height=300, disabled=True, key=f"form_hist_{rid}")
                 if st.button("📥 Carregar este parecer para edição", key=f"load_hist_{rid}"):
                     st.session_state["parecer_patenteabilidade_resultado"] = row.get("parecer_gerado") or ""
+                    st.session_state["parecer_patenteabilidade_fatos"] = row.get("fatos_extraidos") or ""
                     st.session_state["parecer_patenteabilidade_pdf_text"] = row.get("formulario_extraido") or ""
                     st.session_state["parecer_patenteabilidade_notas_resgatadas"] = row.get("observacoes_reuniao") or ""
                     st.success("Parecer carregado no resultado atual desta sessão.")
@@ -346,82 +410,23 @@ def _render_history():
 
 
 def _extract_question_answers(form_text):
-    """Extrai pares pergunta/resposta do PDF respeitando o delimitador do formulário.
-
-    Muitos rótulos têm dois-pontos dentro de colchetes, por exemplo
-    ``[5][Título:]: On parallel hybrid-electric``. Nesse formato, a pergunta
-    termina em ``]:`` e a resposta começa logo depois. Para campos sem colchetes,
-    usa o último dois-pontos da linha para não cortar rótulos que também contenham
-    dois-pontos. Respostas quebradas em várias linhas são reunidas.
-    """
+    """Extrai pares pergunta/resposta explicitamente preenchidos após ':'."""
     results = []
-    current = None
-
-    def clean(value):
-        value = re.sub(r"\s+", " ", (value or "")).strip()
-        value = value.strip(" \t-•")
-        return value
-
-    def save_current():
-        nonlocal current
-        if not current:
-            return
-        question = clean(current.get("question", ""))
-        answer = clean(current.get("answer", ""))
-        # Retira marcadores de página e não grava campos vazios/não aplicáveis.
-        question = re.sub(r"^\[PÁGINA\s+\d+\]\s*", "", question, flags=re.I)
+    for raw in (form_text or "").splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        if not line or line.startswith("[PÁGINA"):
+            continue
+        if ":" not in line:
+            continue
+        question, answer = line.split(":", 1)
+        question = question.strip(" \t-•")
+        answer = answer.strip(" \t-•")
+        # PDF de formulário às vezes duplica os dois-pontos no rótulo.
+        answer = answer.lstrip(":").strip()
         if question and answer and not _is_irrelevant_line(answer):
             results.append({"Pergunta": question, "Informação extraída": answer})
-        current = None
+    return results
 
-    for raw in (form_text or "").splitlines():
-        line = re.sub(r"[ \t]+", " ", raw).strip()
-        if not line:
-            continue
-        if re.match(r"^\[PÁGINA\s+\d+\]$", line, flags=re.I):
-            continue
-
-        # Caso prioritário do formulário: o rótulo termina com :], seguido de :.
-        # Ex.: [5][Título:]: On parallel hybrid-electric
-        match = re.search(r"\]:\s*", line)
-        if match:
-            save_current()
-            question = clean(line[:match.start() + 1])
-            answer = clean(line[match.end():])
-            current = {"question": question, "answer": answer}
-            continue
-
-        # Campos de texto simples: usa o último ':' para lidar com rótulos que
-        # possuem dois-pontos internos, como "Invenção: : Patente".
-        if ":" in line:
-            left, right = line.rsplit(":", 1)
-            question, answer = clean(left), clean(right)
-            if question and answer:
-                save_current()
-                current = {"question": question, "answer": answer}
-                continue
-            # Linha de pergunta/rótulo sem resposta; não deve virar resposta.
-            if question and not answer:
-                save_current()
-                current = {"question": question, "answer": ""}
-                continue
-
-        # Texto sem delimitador depois de uma resposta pode ser continuação de
-        # uma resposta que o extrator de texto do PDF quebrou entre linhas.
-        if current and current.get("answer") and not re.match(r"^(?:[A-ZÁÉÍÓÚÂÊÔÃÕÇ][^:]{0,90}:\s*)?$", line):
-            current["answer"] = f"{current['answer']} {line}".strip()
-
-    save_current()
-
-    # Elimina duplicatas exatas, preservando a ordem e respostas distintas.
-    unique = []
-    seen = set()
-    for item in results:
-        key = (item["Pergunta"].casefold(), item["Informação extraída"].casefold())
-        if key not in seen:
-            seen.add(key)
-            unique.append(item)
-    return unique
 
 def render():
     st.title("⚖️ Parecer de Patenteabilidade – NIT/IFSC")
@@ -451,6 +456,19 @@ def render():
         _render_history()
         return
 
+    signature = hashlib.sha256(
+        arquivo.getvalue()
+        + b"\0"
+        + notas.encode("utf-8")
+        + b"\0"
+        + numero.encode("utf-8")
+    ).hexdigest()
+    previous_hash = st.session_state.get("parecer_patenteabilidade_upload_hash")
+    if previous_hash != signature:
+        st.session_state["parecer_patenteabilidade_upload_hash"] = signature
+        st.session_state.pop("parecer_patenteabilidade_resultado", None)
+        st.session_state.pop("parecer_patenteabilidade_fatos", None)
+
     try:
         form_text = _extract_pdf(arquivo)
         st.success("PDF carregado e texto extraído com sucesso.")
@@ -477,10 +495,16 @@ def render():
     if st.button("🤖 Realizar análise final e gerar parecer", type="primary", use_container_width=True):
         with st.spinner("A IA está analisando o formulário e as informações da reunião..."):
             try:
-                parecer = _call_groq(form_text, notas)
+                fatos, parecer = _call_groq(form_text, notas)
+                st.session_state["parecer_patenteabilidade_fatos"] = fatos
                 st.session_state["parecer_patenteabilidade_resultado"] = parecer
                 st.session_state["parecer_patenteabilidade_pdf_text"] = form_text
-                _save_history(numero, arquivo.name, form_text, notas, parecer)
+                history_saved = _save_history(numero, arquivo.name, form_text, notas, fatos, parecer)
+                if not history_saved:
+                    st.warning(
+                        "O parecer foi gerado, mas não foi salvo no histórico do Supabase. "
+                        "Confira a conexão e aplique a atualização da tabela indicada no SQL do projeto."
+                    )
             except Exception as exc:
                 st.error(f"Erro ao gerar o parecer: {exc}")
                 return
@@ -489,6 +513,10 @@ def render():
     if parecer:
         st.divider()
         st.subheader("📋 Minuta do Parecer Técnico")
+        fatos = st.session_state.get("parecer_patenteabilidade_fatos")
+        if fatos:
+            with st.expander("🔗 Conferir fatos extraídos e usados nesta minuta"):
+                st.markdown(fatos)
         st.markdown(parecer)
 
         docx_bytes = gerar_docx(parecer)
