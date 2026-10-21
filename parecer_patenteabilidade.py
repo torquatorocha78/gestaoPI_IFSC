@@ -1,7 +1,9 @@
-import io
+import csv
 import hashlib
+import io
 import os
 import re
+import unicodedata
 from datetime import datetime
 
 import requests
@@ -9,7 +11,6 @@ import streamlit as st
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt
-from pypdf import PdfReader
 
 import database as db
 
@@ -27,138 +28,125 @@ def _secret(name, default=""):
         return default
 
 
-def _extract_pdf(uploaded_file):
+def _sem_acentos(value):
+    normalized = unicodedata.normalize("NFKD", value or "")
+    return "".join(char for char in normalized if not unicodedata.combining(char)).casefold()
+
+
+def _excel_column(number):
+    """Converte um índice de coluna baseado em 1 para letras do Excel."""
+    result = ""
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
+def _column_number(label):
+    number = 0
+    for char in label.upper():
+        number = number * 26 + ord(char) - 64
+    return number
+
+
+def _is_empty_or_not_applicable(value):
+    value = re.sub(r"\s+", " ", (value or "")).strip()
+    normalized = _sem_acentos(value).strip(" .!;\t")
+    return not normalized or normalized in {
+        "nao aplicavel",
+        "nao se aplica",
+        "n/a",
+        "na",
+    }
+
+
+def _read_csv(uploaded_file):
+    """Lê o CSV de duas linhas: cabeçalhos/perguntas e respostas."""
     data = uploaded_file.getvalue()
-    reader = PdfReader(io.BytesIO(data))
-    pages = []
-    ocr_context = None
-    for i, page in enumerate(reader.pages, 1):
-        text = page.extract_text() or ""
-        image_ratio = 0.0
+    decoded = None
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
         try:
-            page_width = float(page.mediabox.width)
-            page_height = float(page.mediabox.height)
-            page_area = page_width * page_height
-            image_area = sum(
-                float(image.image.size[0]) * float(image.image.size[1])
-                for image in page.images
-            )
-            image_ratio = image_area / page_area if page_area else 0.0
-        except Exception:
-            pass
-        if (len(text.strip()) < 40 and image_ratio > 0) or (
-            image_ratio >= 0.2 and len(text.strip()) < 2000
-        ):
-            if ocr_context is None:
-                try:
-                    import fitz
-                    import pytesseract
-                    from PIL import Image
-                    ocr_doc = fitz.open(stream=data, filetype="pdf")
-                    ocr_context = (fitz, pytesseract, Image, ocr_doc)
-                except ImportError as exc:
-                    raise RuntimeError(
-                        "O PDF contém páginas digitalizadas e precisa de OCR. Instale PyMuPDF, "
-                        "pytesseract, Pillow e o Tesseract OCR com idioma português."
-                    ) from exc
-            fitz, pytesseract, Image, ocr_doc = ocr_context
-            pix = ocr_doc.load_page(i - 1).get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-            image = Image.open(io.BytesIO(pix.tobytes("png")))
-            try:
-                ocr_text = pytesseract.image_to_string(image, lang="por+eng")
-            except Exception as exc:
-                raise RuntimeError(
-                    "Não foi possível executar OCR em português. Verifique se o Tesseract e os "
-                    "pacotes de idioma por/eng estão instalados."
-                ) from exc
-            # Em páginas híbridas, manter texto selecionável e OCR juntos evita
-            # perder respostas manuscritas sobrepostas à estrutura do formulário.
-            if ocr_text.strip() and image_ratio >= 0.2 and len(text.strip()) >= 40:
-                text = f"{text.strip()}\n[LEITURA OCR COMPLEMENTAR]\n{ocr_text.strip()}"
-            elif len(ocr_text.strip()) > len(text.strip()):
-                text = ocr_text
-        if text.strip():
-            pages.append(f"[PÁGINA {i}]\n{text.strip()}")
-    extracted = "\n\n".join(pages)
-    if not extracted.strip():
-        raise RuntimeError("Não foi possível extrair texto do PDF. Se for uma digitalização, habilite o OCR e tente novamente.")
-    return extracted
+            decoded = data.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if decoded is None:
+        raise ValueError("Não consegui decodificar o CSV. Salve o arquivo como CSV UTF-8 e tente novamente.")
+
+    sample = decoded[:8192]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+    except csv.Error:
+        dialect = csv.excel
+    rows = list(csv.reader(io.StringIO(decoded, newline=""), dialect))
+    rows = [row for row in rows if any((cell or "").strip() for cell in row)]
+    if len(rows) != 2:
+        raise ValueError(
+            f"Esperava duas linhas lógicas (perguntas e respostas), mas encontrei {len(rows)}. "
+            "Exporte uma única resposta do formulário para CSV."
+        )
+
+    questions, answers = rows
+    if len(questions) != len(answers):
+        raise ValueError(
+            f"A linha de perguntas tem {len(questions)} colunas e a de respostas tem {len(answers)}. "
+            "Confira se o CSV contém uma única resposta completa."
+        )
+
+    pairs = []
+    for index, (question, answer) in enumerate(zip(questions, answers), 1):
+        question = re.sub(r"\s+", " ", (question or "")).strip()
+        answer = (answer or "").strip()
+        if not question or _is_empty_or_not_applicable(answer):
+            continue
+        pairs.append({
+            "coluna": _excel_column(index),
+            "pergunta": question,
+            "resposta": answer,
+        })
+    if not pairs:
+        raise ValueError("O CSV não tem respostas preenchidas diferentes de 'Não aplicável'.")
+    return pairs
 
 
-def _clean_ai_text(text):
-    text = text.strip()
-    text = re.sub(r"^```(?:markdown|text)?\s*", "", text, flags=re.I)
-    text = re.sub(r"\s*```$", "", text)
-    return text.strip()
+def _is_patent_form(pairs):
+    for item in pairs:
+        question = _sem_acentos(item["pergunta"])
+        answer = _sem_acentos(item["resposta"])
+        if "invencao" not in question:
+            continue
+        if "programa de computador" in answer or "software" in answer:
+            return False
+        if "desenho industrial" in answer:
+            return False
+        if "patente" in answer or "invencao" in answer or "modelo de utilidade" in answer:
+            return True
+    return None
 
 
-def _is_irrelevant_line(line):
-    """Identifica linhas que normalmente são ruído do formulário.
-    Não remove respostas preenchidas; apenas opções vazias, marcadores e 'Não aplicável'.
-    """
-    x = re.sub(r"\s+", " ", (line or "")).strip()
-    if not x:
-        return True
-    if re.fullmatch(r"[\W_]+", x):
-        return True
-    if re.fullmatch(r"n[aã]o\s+aplic[aá]vel[.!]?", x, flags=re.I):
-        return True
-    # Caixas/opções claramente não selecionadas.
-    if re.fullmatch(r"(?:\[\s*\]|☐|□|○|◯)\s*", x):
-        return True
-    return False
+def _filter_patent_pairs(pairs):
+    """Retém dados de patente e remove software, desenho e metadados do formulário."""
+    result = []
+    excluded_start = _column_number("EI")
+    excluded_end = _column_number("UO")
+    excluded_metadata_columns = {2, 6}  # Data de envio e data da última ação.
+
+    for item in pairs:
+        column_number = _column_number(item["coluna"])
+        if column_number in excluded_metadata_columns:
+            continue
+        if excluded_start <= column_number <= excluded_end:
+            continue
+        result.append(item)
+    return result
 
 
-def _extract_relevant_form(form_text):
-    """Filtra o formulário por conteúdo preenchido, sem truncar por posição.
+def _format_pairs(pairs):
+    return "\n\n".join(
+        f"[{item['coluna']}] PERGUNTA: {item['pergunta']}\nRESPOSTA: {item['resposta']}"
+        for item in pairs
+    )
 
-    O formulário continua sendo lido integralmente pelo Python. A redução ocorre
-    por conteúdo: linhas vazias, respostas isoladas 'Não aplicável' e marcadores
-    vazios são removidos. Nenhum bloco é cortado por estar no meio do PDF.
-    """
-    pages = re.split(r"(?=\[PÁGINA\s+\d+\])", form_text or "")
-    kept_pages = []
-    for page in pages:
-        lines = []
-        for raw in page.splitlines():
-            line = re.sub(r"[ \t]+", " ", raw).strip()
-            if _is_irrelevant_line(line):
-                continue
-            lines.append(line)
-        if lines:
-            kept_pages.append("\n".join(lines))
-
-    cleaned = "\n\n".join(kept_pages).strip()
-    # Compressão adicional sem descartar conteúdo: linhas muito longas continuam completas.
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned
-
-
-def _split_complete_chunks(text, max_chars=8500):
-    """Divide todo o texto em blocos sem descartar páginas ou linhas finais."""
-    chunks, current, size = [], [], 0
-    for line in (text or "").splitlines():
-        pieces = [line]
-        if len(line) > max_chars:
-            pieces, piece = [], ""
-            for word in line.split():
-                candidate = f"{piece} {word}".strip()
-                if len(candidate) > max_chars and piece:
-                    pieces.append(piece)
-                    piece = word
-                else:
-                    piece = candidate
-            if piece:
-                pieces.append(piece)
-        for part in pieces:
-            if current and size + len(part) + 1 > max_chars:
-                chunks.append("\n".join(current))
-                current, size = [], 0
-            current.append(part)
-            size += len(part) + 1
-    if current:
-        chunks.append("\n".join(current))
-    return [chunk for chunk in chunks if chunk.strip()]
 
 def _groq_request(api_key, messages, max_tokens):
     response = requests.post(
@@ -172,111 +160,61 @@ def _groq_request(api_key, messages, max_tokens):
         },
         timeout=120,
     )
-    if response.status_code == 413:
-        raise RuntimeError(
-            "A solicitação excedeu o limite de tokens da Groq. O módulo agora trabalha em duas etapas "
-            "com conteúdo filtrado; verifique o limite TPM da conta Groq se o erro persistir."
-        )
     if response.status_code >= 400:
         raise RuntimeError(f"Groq retornou {response.status_code}: {response.text}")
     content = response.json()["choices"][0]["message"].get("content") or ""
-    return _clean_ai_text(content)
+    return content.strip()
 
 
-def _call_groq(form_text, meeting_notes):
+def _call_groq(form_answers, meeting_notes):
     api_key = _secret("GROQ_API_KEY")
     if not api_key:
         raise RuntimeError("GROQ_API_KEY não configurada nos Secrets do Streamlit.")
+    if not form_answers.strip():
+        raise RuntimeError("Não há respostas preenchidas para gerar o parecer.")
 
-    # ETAPA 1: o PDF inteiro é lido e analisado em blocos para não perder páginas finais.
-    relevant = _extract_relevant_form(form_text)
-    if not relevant.strip():
-        raise RuntimeError("O PDF não contém respostas preenchidas que possam ser usadas no parecer.")
+    system = """
+Você é assistente técnico do Núcleo de Inovação Tecnológica – NIT/IFSC e deve redigir uma minuta de parecer preliminar de patenteabilidade.
 
-    extraction_system = """
-Você é um extrator de informações para o NIT/IFSC.
-Extraia SOMENTE fatos explicitamente preenchidos no formulário de Notificação de Criação/Invenção.
-Ignore campos vazios, 'Não aplicável', opções não selecionadas e instruções do formulário.
-Não faça análise jurídica, não invente nada e não complete lacunas.
-Organize em tópicos curtos: identificação, tecnologia/objeto, inventores, titularidade,
-financiamento, divulgação, estágio de desenvolvimento, características técnicas,
-aplicações e quaisquer outras informações efetivamente preenchidas.
-Se um tópico não estiver informado, não o inclua.
-Preserve nomes, datas e percentuais exatamente como aparecem.
-"""
-    fatos_por_bloco = []
-    chunks = _split_complete_chunks(relevant)
-    for index, chunk in enumerate(chunks, 1):
-        extraction_user = (
-            f"BLOCO {index} DE {len(chunks)} DO FORMULÁRIO. Extraia todos os fatos preenchidos "
-            f"deste bloco, sem inferir respostas de outros blocos:\n{chunk}"
-        )
-        facts = _groq_request(
-            api_key,
-            [{"role": "system", "content": extraction_system}, {"role": "user", "content": extraction_user}],
-            max_tokens=1200,
-        )
-        if facts:
-            fatos_por_bloco.append(f"[FATOS DO BLOCO {index}]\n{facts}")
-    fatos = "\n\n".join(fatos_por_bloco).strip()
-    if not fatos:
-        raise RuntimeError(
-            "A extração não encontrou respostas preenchidas. O parecer não foi gerado para evitar "
-            "um relatório vazio; confira o texto extraído ou use um PDF com texto/OCR legível."
-        )
+REGRAS:
+- As perguntas e respostas preenchidas do CSV abaixo são a fonte principal e obrigatória do parecer. Use efetivamente os dados informados, preservando nomes, percentuais, datas, descrição e referências.
+- Não ignore respostas preenchidas relevantes e não substitua a descrição específica por texto genérico.
+- Respostas vazias e 'Não aplicável' já foram removidas. Não invente o conteúdo que falta.
+- Use as observações da reunião apenas como informação complementar, identificando-as como relato interno.
+- Avalie a tecnologia para proteção patentária em caráter preliminar. Use as palavras-chave e as referências de anterioridade registradas no CSV como material informado, sem afirmar que fez uma busca oficial nem que confirmou novidade ou atividade inventiva.
+- Diferencie fatos registrados de avaliação técnica preliminar. Se os dados não permitirem uma conclusão, declare a limitação.
+- Escreva em português claro, sem criar leis, testes, empresas, concorrentes ou resultados que não apareçam nas fontes.
 
-    # ETAPA 2: síntese do parecer. A segunda chamada recebe apenas fatos estruturados
-    # e as observações da reunião, evitando reenviar as 34 páginas.
-    final_system = """
-Você é um assistente técnico do Núcleo de Inovação Tecnológica – NIT/IFSC.
-Elabore uma MINUTA DE PARECER TÉCNICO DE AVALIAÇÃO DE TECNOLOGIA / PATENTEABILIDADE.
-
-REGRAS OBRIGATÓRIAS:
-1. Use somente os fatos extraídos do formulário e as observações da reunião fornecidas abaixo.
-2. Ignore lacunas; não invente nomes, datas, percentuais, TRL, empresas, anterioridades,
-artigos de lei, testes ou características técnicas.
-3. Observações da reunião são subsídio interno do NIT e não equivalem a fonte externa verificada.
-4. Preserve a terminologia e a organização do modelo NIT/IFSC.
-5. Quando depender de pesquisa oficial do INPI, registre isso como ressalva.
-6. Não crie tabela de anterioridade sem documentos fornecidos.
-7. Diferencie fatos fornecidos de conclusões técnicas preliminares.
-8. Não force uma seção sem informação suficiente.
-
-ESTRUTURA:
-PARECER TÉCNICO DE AVALIAÇÃO DE TECNOLOGIA – NIT/IFSC
-I – Identificação
-II – Descrição da tecnologia
-III – Estado da técnica / anterioridade
-IV – Patenteabilidade
-V – Maturidade tecnológica
-VI – Potencial de mercado
-VII – Aspectos de propriedade intelectual
-VIII – Riscos e recomendações
-IX – Conclusão
+Estruture o parecer conforme as informações disponíveis:
+PARECER TÉCNICO – NIT/IFSC
+I – Identificação e inventores
+II – Descrição da criação
+III – Análise preliminar de proteção e anterioridade
+IV – Maturidade e desenvolvimento
+V – Aplicações e potencial de exploração
+VI – Titularidade e aspectos de propriedade intelectual
+VII – Riscos e recomendações
+VIII – Conclusão
 PARECER DO NIT
 """
-    notes = _extract_relevant_form(meeting_notes or "")
-    final_user = f"""
-FATOS EXTRAÍDOS DO FORMULÁRIO:
-{fatos}
+    user = f"""
+RESPOSTAS PREENCHIDAS DO FORMULÁRIO (coluna, pergunta e resposta):
+{form_answers}
 
-OBSERVAÇÕES DA REUNIÃO / INFORMAÇÕES COMPLEMENTARES DO NIT:
-{notes if notes else '(Nenhuma informação complementar fornecida.)'}
+OBSERVAÇÕES DA REUNIÃO / COMPLEMENTOS DO NIT:
+{meeting_notes.strip() if meeting_notes.strip() else '(Nenhuma informação complementar fornecida.)'}
 
-Use os fatos acima como fonte obrigatória do parecer. Aproveite cada informação preenchida
-na seção correspondente; não substitua os fatos por texto genérico. Se houver lacuna,
-informe a limitação em vez de inventar uma resposta.
-
-Elabore a minuta final do parecer.
+Redija o parecer usando as respostas específicas acima nas seções correspondentes.
 """
-    parecer = _groq_request(
+    result = _groq_request(
         api_key,
-        [{"role": "system", "content": final_system}, {"role": "user", "content": final_user}],
-        max_tokens=1800,
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        max_tokens=3500,
     )
-    if not parecer:
+    if not result:
         raise RuntimeError("A IA retornou um parecer vazio. Tente novamente.")
-    return fatos, parecer
+    return result
+
 
 def _add_markdown_like(doc, text):
     for raw in text.splitlines():
@@ -285,24 +223,22 @@ def _add_markdown_like(doc, text):
             doc.add_paragraph()
             continue
         if line.startswith("### "):
-            p = doc.add_heading(line[4:], level=3)
+            paragraph = doc.add_heading(line[4:], level=3)
         elif line.startswith("## "):
-            p = doc.add_heading(line[3:], level=2)
+            paragraph = doc.add_heading(line[3:], level=2)
         elif line.startswith("# "):
-            p = doc.add_heading(line[2:], level=1)
+            paragraph = doc.add_heading(line[2:], level=1)
         elif re.match(r"^[IVX]+\s*[–-]", line):
-            p = doc.add_heading(line, level=2)
+            paragraph = doc.add_heading(line, level=2)
         else:
-            p = doc.add_paragraph()
-            # Basic bold support for **text**.
+            paragraph = doc.add_paragraph()
             parts = re.split(r"(\*\*.*?\*\*)", line)
             for part in parts:
                 if part.startswith("**") and part.endswith("**"):
-                    r = p.add_run(part[2:-2])
-                    r.bold = True
+                    paragraph.add_run(part[2:-2]).bold = True
                 else:
-                    p.add_run(part)
-        p.paragraph_format.space_after = Pt(6)
+                    paragraph.add_run(part)
+        paragraph.paragraph_format.space_after = Pt(6)
 
 
 def gerar_docx(parecer):
@@ -312,36 +248,38 @@ def gerar_docx(parecer):
     section.bottom_margin = Pt(45)
     section.left_margin = Pt(55)
     section.right_margin = Pt(55)
-
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = title.add_run("INSTITUTO FEDERAL DE SANTA CATARINA – IFSC\n")
     run.bold = True
     run.font.size = Pt(13)
-    run2 = title.add_run("NÚCLEO DE INOVAÇÃO TECNOLÓGICA – NIT")
-    run2.bold = True
-    run2.font.size = Pt(12)
+    run = title.add_run("NÚCLEO DE INOVAÇÃO TECNOLÓGICA – NIT")
+    run.bold = True
+    run.font.size = Pt(12)
     doc.add_paragraph()
     _add_markdown_like(doc, parecer)
+    output = io.BytesIO()
+    doc.save(output)
+    return output.getvalue()
 
-    out = io.BytesIO()
-    doc.save(out)
-    return out.getvalue()
 
-
-def _save_history(numero_patente, documento_nome, form_text, notes, fatos, parecer):
+def _save_history(numero_patente, documento_nome, form_text, notes, parecer):
     try:
         payload = {
             "numero_patente": numero_patente or None,
             "documento_nome": documento_nome or None,
             "formulario_extraido": form_text or None,
             "observacoes_reuniao": notes or None,
-            "fatos_extraidos": fatos or None,
             "parecer_gerado": parecer or None,
             "modelo": MODEL,
             "criado_em": datetime.now().isoformat(),
         }
-        db._request("POST", db._endpoint("pareceres_patenteabilidade"), headers=db._headers("return=minimal"), json=payload)
+        db._request(
+            "POST",
+            db._endpoint("pareceres_patenteabilidade"),
+            headers=db._headers("return=minimal"),
+            json=payload,
+        )
         return True
     except Exception:
         return False
@@ -352,7 +290,11 @@ def _load_history(limit=100, numero_patente=None):
     if numero_patente and numero_patente.strip():
         from urllib.parse import quote
         params += f"&numero_patente=eq.{quote(numero_patente.strip(), safe='')}"
-    data = db._request("GET", f"{db._endpoint('pareceres_patenteabilidade')}?{params}", headers=db._headers())
+    data = db._request(
+        "GET",
+        f"{db._endpoint('pareceres_patenteabilidade')}?{params}",
+        headers=db._headers(),
+    )
     return data or []
 
 
@@ -368,173 +310,165 @@ def _delete_history(item_id):
 def _render_history():
     st.divider()
     st.subheader("🗂️ Histórico de pareceres de patenteabilidade")
-    st.caption("As análises ficam salvas no Supabase para consulta e resgate posterior, inclusive o formulário extraído e as observações da reunião.")
-    busca = st.text_input("🔎 Resgatar por número do processo / PI", key="busca_historico_parecer", placeholder="Digite o número do processo ou deixe vazio para ver os mais recentes")
+    st.caption("Pareceres e respostas filtradas do CSV ficam salvos no Supabase.")
+    busca = st.text_input(
+        "🔎 Buscar por número do processo / PI",
+        key="busca_historico_parecer",
+        placeholder="Digite o número do processo ou deixe vazio para ver os mais recentes",
+    )
     try:
         registros = _load_history(100, busca)
         if not registros:
-            st.info("Nenhum parecer registrado para este filtro." if busca.strip() else "Nenhum parecer de patenteabilidade registrado ainda.")
+            st.info("Nenhum parecer registrado para este filtro." if busca.strip() else "Nenhum parecer registrado ainda.")
             return
         for row in registros:
-            rid = row.get("id")
-            data = str(row.get("criado_em") or "")[:19].replace("T", " ")
-            numero = row.get("numero_patente") or "Sem número informado"
-            doc = row.get("documento_nome") or "Sem PDF"
-            with st.expander(f"{data} — {numero} — {doc}"):
-                st.markdown(f"**Processo / PI:** {numero}")
-                st.markdown(f"**Documento:** {doc}")
+            row_id = row.get("id")
+            date = str(row.get("criado_em") or "")[:19].replace("T", " ")
+            number = row.get("numero_patente") or "Sem número informado"
+            document = row.get("documento_nome") or "Sem CSV"
+            with st.expander(f"{date} — {number} — {document}"):
+                st.markdown(f"**Processo / PI:** {number}")
+                st.markdown(f"**CSV:** {document}")
                 st.markdown(f"**Modelo de IA:** {row.get('modelo') or '-'}")
                 st.markdown("**Observações da reunião:**")
                 st.write(row.get("observacoes_reuniao") or "Nenhuma observação registrada.")
-                st.markdown("**Fatos extraídos e usados:**")
-                st.markdown(row.get("fatos_extraidos") or "Fatos estruturados não registrados neste parecer.")
+                st.markdown("**Respostas do CSV usadas:**")
+                with st.expander("Ver perguntas e respostas filtradas"):
+                    st.text_area(
+                        "Respostas",
+                        row.get("formulario_extraido") or "",
+                        height=280,
+                        disabled=True,
+                        key=f"csv_hist_{row_id}",
+                    )
                 st.markdown("**Parecer gerado:**")
                 st.markdown(row.get("parecer_gerado") or "-")
-                with st.expander("📄 Resgatar formulário extraído do PDF"):
-                    st.text_area("Conteúdo do formulário", row.get("formulario_extraido") or "", height=300, disabled=True, key=f"form_hist_{rid}")
-                if st.button("📥 Carregar este parecer para edição", key=f"load_hist_{rid}"):
+                if st.button("📥 Carregar este parecer", key=f"load_hist_{row_id}"):
                     st.session_state["parecer_patenteabilidade_resultado"] = row.get("parecer_gerado") or ""
-                    st.session_state["parecer_patenteabilidade_fatos"] = row.get("fatos_extraidos") or ""
-                    st.session_state["parecer_patenteabilidade_pdf_text"] = row.get("formulario_extraido") or ""
+                    st.session_state["parecer_patenteabilidade_dados"] = row.get("formulario_extraido") or ""
                     st.session_state["parecer_patenteabilidade_notas_resgatadas"] = row.get("observacoes_reuniao") or ""
-                    st.success("Parecer carregado no resultado atual desta sessão.")
-                if st.button("🗑️ Excluir este histórico", key=f"del_hist_{rid}"):
-                    try:
-                        _delete_history(rid)
-                        st.success("Histórico excluído.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Erro ao excluir histórico: {exc}")
+                    st.success("Parecer carregado nesta sessão.")
+                if st.button("🗑️ Excluir este histórico", key=f"del_hist_{row_id}"):
+                    _delete_history(row_id)
+                    st.success("Histórico excluído.")
+                    st.rerun()
     except Exception as exc:
         st.error(f"Não foi possível consultar o histórico no Supabase: {exc}")
 
 
-def _extract_question_answers(form_text):
-    """Extrai pares pergunta/resposta explicitamente preenchidos após ':'."""
-    results = []
-    for raw in (form_text or "").splitlines():
-        line = re.sub(r"\s+", " ", raw).strip()
-        if not line or line.startswith("[PÁGINA"):
-            continue
-        if ":" not in line:
-            continue
-        question, answer = line.split(":", 1)
-        question = question.strip(" \t-•")
-        answer = answer.strip(" \t-•")
-        # PDF de formulário às vezes duplica os dois-pontos no rótulo.
-        answer = answer.lstrip(":").strip()
-        if question and answer and not _is_irrelevant_line(answer):
-            results.append({"Pergunta": question, "Informação extraída": answer})
-    return results
+def _render_result():
+    parecer = st.session_state.get("parecer_patenteabilidade_resultado")
+    if not parecer:
+        return
+    st.divider()
+    st.subheader("📋 Minuta do Parecer Técnico")
+    data_used = st.session_state.get("parecer_patenteabilidade_dados")
+    if data_used:
+        with st.expander("🔗 Conferir perguntas e respostas usadas no parecer"):
+            st.text_area("Dados enviados à análise", data_used, height=300, disabled=True, key="parecer_dados_resultado")
+    st.markdown(parecer)
+    number = re.sub(
+        r"[^A-Za-z0-9_-]+",
+        "_",
+        st.session_state.get("parecer_patenteabilidade_numero", "") or "parecer_patenteabilidade",
+    ).strip("_")
+    st.download_button(
+        "📄 Baixar parecer em Word (.docx)",
+        gerar_docx(parecer),
+        f"Parecer_Patenteabilidade_NIT_IFSC_{number or 'NIT'}.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        use_container_width=True,
+    )
+    st.download_button(
+        "📝 Baixar parecer em texto (.txt)",
+        parecer.encode("utf-8"),
+        f"Parecer_Patenteabilidade_NIT_IFSC_{number or 'NIT'}.txt",
+        "text/plain",
+        use_container_width=True,
+    )
 
 
 def render():
     st.title("⚖️ Parecer de Patenteabilidade – NIT/IFSC")
-    st.caption("Analisa o formulário de Notificação de Criação/Invenção e as informações complementares registradas pelo NIT.")
+    st.caption("Carregue o CSV do formulário. A linha de perguntas será associada à linha de respostas.")
 
-    st.info("A IA utiliza somente informações preenchidas. Campos em branco ou marcados como 'Não aplicável' são ignorados e não são mencionados no parecer.")
-
-    arquivo = st.file_uploader("📄 Formulário de Notificação de Criação/Invenção (PDF)", type=["pdf"], key="pdf_patenteabilidade")
+    arquivo = st.file_uploader(
+        "📊 CSV do Formulário de Notificação de Invenção",
+        type=["csv"],
+        key="csv_patenteabilidade",
+    )
     numero = st.text_input("Número do processo / PI (opcional)", key="parecer_numero")
     notas = st.text_area(
-        "📝 Observações da reunião com o inventor / Informações complementares do NIT",
-        height=260,
+        "📝 Observações da reunião com o inventor / complementos do NIT",
+        height=200,
         value=st.session_state.pop("parecer_patenteabilidade_notas_resgatadas", ""),
         key="parecer_notas_reuniao",
-        placeholder=(
-            "Registre aqui informações obtidas na reunião que sejam relevantes para o parecer, por exemplo:\n"
-            "• interesse de empresa para futura transferência/licenciamento;\n"
-            "• TRL ou nível de maturidade informado;\n"
-            "• intenção do inventor ao proteger a tecnologia (transferência, exploração comercial, currículo, pesquisa etc.);\n"
-            "• protótipo, testes, validações ou próximos passos relatados;\n"
-            "• parceiros, mercado potencial ou estratégia de exploração."
-        ),
-        help="Este campo é subsídio interno para a IA. Não é uma seção que será simplesmente copiada para o parecer.",
+        placeholder="Registre informações complementares obtidas pelo NIT, se houver.",
     )
 
     if not arquivo:
         _render_history()
+        _render_result()
         return
+
+    try:
+        all_pairs = _read_csv(arquivo)
+    except Exception as exc:
+        st.error(f"Não foi possível ler o CSV: {exc}")
+        _render_history()
+        return
+
+    patent_form = _is_patent_form(all_pairs)
+    if patent_form is not True:
+        st.error(
+            "Este módulo gera parecer somente quando a resposta ao campo 'Invenção' identifica "
+            "um pedido de patente ou modelo de utilidade. Confira o tipo da criação no CSV."
+        )
+        _render_history()
+        _render_result()
+        return
+
+    selected_pairs = _filter_patent_pairs(all_pairs)
+    if not selected_pairs:
+        st.error("Não restaram respostas preenchidas para o tipo de criação selecionado.")
+        _render_history()
+        return
+
+    form_answers = _format_pairs(selected_pairs)
+    st.success(f"{len(selected_pairs)} respostas de patente selecionadas. Colunas EI–UO e datas de envio/última ação foram excluídas.")
+    with st.expander("🔎 Conferir respostas que serão enviadas para análise", expanded=True):
+        import pandas as pd
+        st.dataframe(pd.DataFrame(selected_pairs), use_container_width=True, hide_index=True)
+        st.download_button(
+            "Baixar respostas filtradas (.csv)",
+            pd.DataFrame(selected_pairs).to_csv(index=False).encode("utf-8-sig"),
+            "respostas_formulario_filtradas.csv",
+            "text/csv",
+        )
 
     signature = hashlib.sha256(
         arquivo.getvalue()
-        + b"\0"
-        + notas.encode("utf-8")
-        + b"\0"
-        + numero.encode("utf-8")
+        + b"\0" + notas.encode("utf-8")
+        + b"\0" + numero.encode("utf-8")
     ).hexdigest()
-    previous_hash = st.session_state.get("parecer_patenteabilidade_upload_hash")
-    if previous_hash != signature:
-        st.session_state["parecer_patenteabilidade_upload_hash"] = signature
+    if st.session_state.get("parecer_patenteabilidade_signature") != signature:
+        st.session_state["parecer_patenteabilidade_signature"] = signature
         st.session_state.pop("parecer_patenteabilidade_resultado", None)
-        st.session_state.pop("parecer_patenteabilidade_fatos", None)
+        st.session_state.pop("parecer_patenteabilidade_dados", None)
 
-    try:
-        form_text = _extract_pdf(arquivo)
-        st.success("PDF carregado e texto extraído com sucesso.")
-        with st.expander("🔎 Conferir conteúdo extraído do formulário"):
-            st.text_area("Conteúdo", form_text, height=300, disabled=True)
-        qa = _extract_question_answers(form_text)
-        if qa:
-            st.subheader("Campos preenchidos extraídos do PDF")
-            st.caption("Somente perguntas com conteúdo após os dois-pontos são exibidas; campos vazios são ignorados.")
-            st.dataframe(qa, use_container_width=True, hide_index=True)
-            import pandas as pd
-            qa_buffer = io.BytesIO()
-            pd.DataFrame(qa).to_excel(qa_buffer, index=False, engine="openpyxl")
-            st.download_button(
-                "⬇️ Baixar perguntas e respostas extraídas (.xlsx)",
-                data=qa_buffer.getvalue(),
-                file_name="Campos_extraidos_notificacao_PI.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-    except Exception as exc:
-        st.error(f"Não foi possível ler o PDF: {exc}")
-        return
-
-    if st.button("🤖 Realizar análise final e gerar parecer", type="primary", use_container_width=True):
-        with st.spinner("A IA está analisando o formulário e as informações da reunião..."):
+    if st.button("🤖 Gerar parecer a partir destas respostas", type="primary", use_container_width=True):
+        with st.spinner("A IA está analisando as respostas preenchidas do formulário..."):
             try:
-                fatos, parecer = _call_groq(form_text, notas)
-                st.session_state["parecer_patenteabilidade_fatos"] = fatos
+                parecer = _call_groq(form_answers, notas)
                 st.session_state["parecer_patenteabilidade_resultado"] = parecer
-                st.session_state["parecer_patenteabilidade_pdf_text"] = form_text
-                history_saved = _save_history(numero, arquivo.name, form_text, notas, fatos, parecer)
+                st.session_state["parecer_patenteabilidade_dados"] = form_answers
+                st.session_state["parecer_patenteabilidade_numero"] = numero
+                history_saved = _save_history(numero, arquivo.name, form_answers, notas, parecer)
                 if not history_saved:
-                    st.warning(
-                        "O parecer foi gerado, mas não foi salvo no histórico do Supabase. "
-                        "Confira a conexão e aplique a atualização da tabela indicada no SQL do projeto."
-                    )
+                    st.warning("Parecer gerado, mas não salvo no histórico do Supabase. Verifique a conexão.")
             except Exception as exc:
                 st.error(f"Erro ao gerar o parecer: {exc}")
                 return
 
-    parecer = st.session_state.get("parecer_patenteabilidade_resultado")
-    if parecer:
-        st.divider()
-        st.subheader("📋 Minuta do Parecer Técnico")
-        fatos = st.session_state.get("parecer_patenteabilidade_fatos")
-        if fatos:
-            with st.expander("🔗 Conferir fatos extraídos e usados nesta minuta"):
-                st.markdown(fatos)
-        st.markdown(parecer)
-
-        docx_bytes = gerar_docx(parecer)
-        nome = re.sub(r"[^A-Za-z0-9_-]+", "_", numero or "parecer_patenteabilidade").strip("_")
-        st.download_button(
-            "📄 Extrair Parecer em Word (.docx)",
-            docx_bytes,
-            f"Parecer_Patenteabilidade_NIT_IFSC_{nome or 'NIT'}.docx",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True,
-        )
-
-        st.download_button(
-            "📝 Baixar texto do parecer (.txt)",
-            parecer.encode("utf-8"),
-            f"Parecer_Patenteabilidade_NIT_IFSC_{nome or 'NIT'}.txt",
-            "text/plain",
-            use_container_width=True,
-        )
-
+    _render_result()
     _render_history()
