@@ -15,6 +15,9 @@ langchain-chroma
 chromadb
 sentence-transformers
 pypdf
+PyMuPDF>=1.24,<2.0
+pytesseract>=0.3.13,<0.4
+Pillow>=10.0,<13.0
 xlrd
 openpyxl
 
@@ -24,4 +27,5 @@ openpyxl
 
 
 python-dateutil
+
 python-docx>=1.1,<2.0
