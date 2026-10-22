@@ -3,7 +3,6 @@ import io
 import os
 import re
 import unicodedata
-import xml.etree.ElementTree as ET
 from datetime import datetime
 
 import requests
@@ -59,72 +58,38 @@ def _is_empty_or_not_applicable(value):
     }
 
 
-def _read_xml_rows(data):
-    root = ET.fromstring(data)
-    rows = []
-    row_names = {"row", "table-row", "tr"}
-    cell_names = {"cell", "table-cell", "td"}
-
-    def local_name(element):
-        return element.tag.rsplit("}", 1)[-1].split(":")[-1].casefold()
-
-    def attribute(element, name):
-        return next(
-            (value for key, value in element.attrib.items() if key.rsplit("}", 1)[-1].casefold() == name),
-            None,
-        )
-
-    for row in root.iter():
-        if local_name(row) not in row_names:
-            continue
-        cells = [child for child in list(row) if local_name(child) in cell_names]
-        if not cells:
-            continue
-        values = []
-        position = 0
-        for cell in cells:
-            index = attribute(cell, "index")
-            if index:
-                target = int(index) - 1
-                while position < target:
-                    values.append("")
-                    position += 1
-            value = " ".join("".join(cell.itertext()).split())
-            repeated = max(1, int(attribute(cell, "number-columns-repeated") or 1))
-            values.extend([value] * repeated)
-            position += repeated
-        if any(value.strip() for value in values):
-            repeated_rows = max(1, int(attribute(row, "number-rows-repeated") or 1))
-            rows.extend([values] * repeated_rows)
-    return rows
-
-
 def _read_spreadsheet(uploaded_file):
-    """Lê planilhas ODS ou XML com perguntas na primeira linha e respostas na segunda."""
+    """Lê uma planilha Excel/ODS com perguntas na primeira linha e respostas na segunda."""
     data = uploaded_file.getvalue()
     extension = os.path.splitext(uploaded_file.name)[1].casefold()
-    if extension == ".ods":
-        try:
-            import pandas as pd
-            frame = pd.read_excel(
-                io.BytesIO(data),
-                engine="odf",
-                header=None,
-                dtype=str,
-                keep_default_na=False,
-            )
-            rows = frame.values.tolist()
-        except ImportError as exc:
-            raise ValueError("Para abrir ODS, instale a dependência odfpy do projeto.") from exc
-        except Exception as exc:
-            raise ValueError(f"Não consegui ler a planilha ODS: {exc}") from exc
-    elif extension == ".xml":
-        try:
-            rows = _read_xml_rows(data)
-        except (ET.ParseError, ValueError) as exc:
-            raise ValueError(f"Não consegui ler o XML da planilha: {exc}") from exc
-    else:
-        raise ValueError("Formato não suportado. Envie uma planilha .ods ou .xml.")
+    engines = {
+        ".ods": "odf",
+        ".xls": "xlrd",
+        ".xlsx": "openpyxl",
+        ".xlsm": "openpyxl",
+        ".xlsb": "pyxlsb",
+        ".xltx": "openpyxl",
+        ".xltm": "openpyxl",
+    }
+    engine = engines.get(extension)
+    if not engine:
+        raise ValueError("Formato não suportado. Envie XLSX, XLS, XLSM, XLSB, XLTX, XLTM ou ODS.")
+
+    try:
+        import pandas as pd
+        frame = pd.read_excel(
+            io.BytesIO(data),
+            engine=engine,
+            header=None,
+            dtype=str,
+            keep_default_na=False,
+        )
+        rows = frame.values.tolist()
+    except ImportError as exc:
+        package = {"odf": "odfpy", "xlrd": "xlrd", "openpyxl": "openpyxl", "pyxlsb": "pyxlsb"}[engine]
+        raise ValueError(f"Para abrir este formato, instale a dependência {package} do projeto.") from exc
+    except Exception as exc:
+        raise ValueError(f"Não consegui ler a planilha {extension}: {exc}") from exc
 
     rows = [[str(cell or "").strip() for cell in row] for row in rows]
     rows = [row for row in rows if any(cell for cell in row)]
@@ -441,8 +406,8 @@ def render():
     st.caption("Carregue a planilha do formulário. A linha de perguntas será associada à linha de respostas.")
 
     arquivo = st.file_uploader(
-        "📊 Planilha do Formulário de Notificação de Invenção (.ods ou .xml)",
-        type=["ods", "xml"],
+        "📊 Planilha do Formulário de Notificação de Invenção (Excel ou ODS)",
+        type=["xlsx", "xls", "xlsm", "xlsb", "xltx", "xltm", "ods"],
         key="planilha_patenteabilidade",
     )
     numero = st.text_input("Número do processo / PI (opcional)", key="parecer_numero")
