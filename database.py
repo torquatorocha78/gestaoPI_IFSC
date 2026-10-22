@@ -20,34 +20,22 @@ def _get_secret(nome: str, padrao: str = "") -> str:
         return padrao
 
 
-# Não usar URL de projeto padrão: isso pode conectar silenciosamente ao banco errado.
-SUPABASE_URL = _get_secret("SUPABASE_URL").strip().rstrip("/")
-if SUPABASE_URL.endswith("/rest/v1"):
-    SUPABASE_URL = SUPABASE_URL[:-len("/rest/v1")].rstrip("/")
+SUPABASE_URL = _get_secret(
+    "SUPABASE_URL",
+    "https://ptxtclyfwlcwqgwzqieu.supabase.co",
+).rstrip("/")
 
-# O Streamlit executa no servidor. Para operações de importação/atualização,
-# priorize uma chave administrativa guardada SOMENTE em Streamlit Secrets.
-# Nunca coloque essa chave no GitHub nem em código enviado ao navegador.
+# Aceita os nomes mais comuns usados no Streamlit/Supabase.
 SUPABASE_KEY = (
-    _get_secret("SUPABASE_SERVICE_ROLE_KEY")
-    or _get_secret("SUPABASE_SECRET_KEY")
-    or _get_secret("SUPABASE_KEY")
+    _get_secret("SUPABASE_KEY")
     or _get_secret("SUPABASE_PUBLISHABLE_KEY")
     or _get_secret("SUPABASE_ANON_KEY")
 )
 
-SUPABASE_TABLE = _get_secret("SUPABASE_TABLE", "patentes").strip()
+SUPABASE_TABLE = _get_secret("SUPABASE_TABLE", "patentes")
 
 
 def _headers(prefer: Optional[str] = None) -> Dict[str, str]:
-    if not SUPABASE_URL:
-        raise RuntimeError(
-            "SUPABASE_URL não configurada. Copie a Project URL em Supabase > Project Settings > API."
-        )
-    if not SUPABASE_KEY:
-        raise RuntimeError(
-            "Chave do Supabase não configurada. Adicione SUPABASE_SERVICE_ROLE_KEY nos Secrets do Streamlit."
-        )
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -125,10 +113,25 @@ def _parse_data(valor: Any) -> Optional[str]:
         return None
     if hasattr(valor, "date") and not isinstance(valor, str):
         return valor.date().isoformat()
+    # Planilhas do INPI podem preencher colunas de data com marcadores textuais
+    # como "Não requerido". Nunca encaminhar esses textos para colunas DATE.
+    marcadores_sem_data = {
+        "nao_requerido",
+        "nao_requerida",
+        "nao_aplicavel",
+        "nao_se_aplica",
+        "n_a",
+        "na",
+        "-",
+    }
+    if _normalizar_texto(valor) in marcadores_sem_data:
+        return None
     try:
         return pd.to_datetime(str(valor).strip(), dayfirst=True, errors="raise").date().isoformat()
     except Exception:
-        return str(valor).strip() or None
+        # Um texto que não pôde ser interpretado não é uma data. Retorná-lo
+        # como string causaria erro 22007 no Supabase e rejeitaria o registro.
+        return None
 
 
 def _normalizar_status(status: Any) -> str:
@@ -414,16 +417,7 @@ def salvar_patente_importada(dados: Dict[str, Any], cur: Any = None) -> Tuple[bo
         )
         return True, "Nova PI importada para o SUPABASE"
     except Exception as exc:
-        mensagem = str(exc)
-        if "row-level security" in mensagem.lower() or "42501" in mensagem:
-            mensagem = (
-                "O Supabase bloqueou a gravação por Row Level Security (RLS). "
-                "A aplicação está usando uma chave pública/anon. Configure "
-                "SUPABASE_SERVICE_ROLE_KEY nos Secrets do Streamlit com a chave administrativa "
-                "do MESMO projeto Supabase e reinicie o app. Não publique essa chave no GitHub. "
-                f"Detalhe original: {mensagem}"
-            )
-        return False, mensagem
+        return False, str(exc)
 
 
 def obter_anuidades(patente_id: Any) -> pd.DataFrame:
