@@ -1,9 +1,9 @@
-import csv
 import hashlib
 import io
 import os
 import re
 import unicodedata
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 import requests
@@ -56,41 +56,89 @@ def _is_empty_or_not_applicable(value):
         "nao aplicavel",
         "nao se aplica",
         "n/a",
-        "na",
     }
 
 
-def _read_csv(uploaded_file):
-    """Lê o CSV de duas linhas: cabeçalhos/perguntas e respostas."""
-    data = uploaded_file.getvalue()
-    decoded = None
-    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
-        try:
-            decoded = data.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
-    if decoded is None:
-        raise ValueError("Não consegui decodificar o CSV. Salve o arquivo como CSV UTF-8 e tente novamente.")
+def _read_xml_rows(data):
+    root = ET.fromstring(data)
+    rows = []
+    row_names = {"row", "table-row", "tr"}
+    cell_names = {"cell", "table-cell", "td"}
 
-    sample = decoded[:8192]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-    except csv.Error:
-        dialect = csv.excel
-    rows = list(csv.reader(io.StringIO(decoded, newline=""), dialect))
-    rows = [row for row in rows if any((cell or "").strip() for cell in row)]
+    def local_name(element):
+        return element.tag.rsplit("}", 1)[-1].split(":")[-1].casefold()
+
+    def attribute(element, name):
+        return next(
+            (value for key, value in element.attrib.items() if key.rsplit("}", 1)[-1].casefold() == name),
+            None,
+        )
+
+    for row in root.iter():
+        if local_name(row) not in row_names:
+            continue
+        cells = [child for child in list(row) if local_name(child) in cell_names]
+        if not cells:
+            continue
+        values = []
+        position = 0
+        for cell in cells:
+            index = attribute(cell, "index")
+            if index:
+                target = int(index) - 1
+                while position < target:
+                    values.append("")
+                    position += 1
+            value = " ".join("".join(cell.itertext()).split())
+            repeated = max(1, int(attribute(cell, "number-columns-repeated") or 1))
+            values.extend([value] * repeated)
+            position += repeated
+        if any(value.strip() for value in values):
+            repeated_rows = max(1, int(attribute(row, "number-rows-repeated") or 1))
+            rows.extend([values] * repeated_rows)
+    return rows
+
+
+def _read_spreadsheet(uploaded_file):
+    """Lê planilhas ODS ou XML com perguntas na primeira linha e respostas na segunda."""
+    data = uploaded_file.getvalue()
+    extension = os.path.splitext(uploaded_file.name)[1].casefold()
+    if extension == ".ods":
+        try:
+            import pandas as pd
+            frame = pd.read_excel(
+                io.BytesIO(data),
+                engine="odf",
+                header=None,
+                dtype=str,
+                keep_default_na=False,
+            )
+            rows = frame.values.tolist()
+        except ImportError as exc:
+            raise ValueError("Para abrir ODS, instale a dependência odfpy do projeto.") from exc
+        except Exception as exc:
+            raise ValueError(f"Não consegui ler a planilha ODS: {exc}") from exc
+    elif extension == ".xml":
+        try:
+            rows = _read_xml_rows(data)
+        except (ET.ParseError, ValueError) as exc:
+            raise ValueError(f"Não consegui ler o XML da planilha: {exc}") from exc
+    else:
+        raise ValueError("Formato não suportado. Envie uma planilha .ods ou .xml.")
+
+    rows = [[str(cell or "").strip() for cell in row] for row in rows]
+    rows = [row for row in rows if any(cell for cell in row)]
     if len(rows) != 2:
         raise ValueError(
             f"Esperava duas linhas lógicas (perguntas e respostas), mas encontrei {len(rows)}. "
-            "Exporte uma única resposta do formulário para CSV."
+            "Exporte uma única resposta do formulário, com perguntas na linha 1 e respostas na linha 2."
         )
 
     questions, answers = rows
     if len(questions) != len(answers):
         raise ValueError(
             f"A linha de perguntas tem {len(questions)} colunas e a de respostas tem {len(answers)}. "
-            "Confira se o CSV contém uma única resposta completa."
+            "Confira se a planilha contém uma única resposta completa."
         )
 
     pairs = []
@@ -105,7 +153,7 @@ def _read_csv(uploaded_file):
             "resposta": answer,
         })
     if not pairs:
-        raise ValueError("O CSV não tem respostas preenchidas diferentes de 'Não aplicável'.")
+        raise ValueError("A planilha não tem respostas preenchidas diferentes de 'Não aplicável'.")
     return pairs
 
 
@@ -177,11 +225,11 @@ def _call_groq(form_answers, meeting_notes):
 Você é assistente técnico do Núcleo de Inovação Tecnológica – NIT/IFSC e deve redigir uma minuta de parecer preliminar de patenteabilidade.
 
 REGRAS:
-- As perguntas e respostas preenchidas do CSV abaixo são a fonte principal e obrigatória do parecer. Use efetivamente os dados informados, preservando nomes, percentuais, datas, descrição e referências.
+- As perguntas e respostas preenchidas da planilha abaixo são a fonte principal e obrigatória do parecer. Use efetivamente os dados informados, preservando nomes, percentuais, datas, descrição e referências.
 - Não ignore respostas preenchidas relevantes e não substitua a descrição específica por texto genérico.
 - Respostas vazias e 'Não aplicável' já foram removidas. Não invente o conteúdo que falta.
 - Use as observações da reunião apenas como informação complementar, identificando-as como relato interno.
-- Avalie a tecnologia para proteção patentária em caráter preliminar. Use as palavras-chave e as referências de anterioridade registradas no CSV como material informado, sem afirmar que fez uma busca oficial nem que confirmou novidade ou atividade inventiva.
+- Avalie a tecnologia para proteção patentária em caráter preliminar. Use as palavras-chave e as referências de anterioridade registradas na planilha como material informado, sem afirmar que fez uma busca oficial nem que confirmou novidade ou atividade inventiva.
 - Diferencie fatos registrados de avaliação técnica preliminar. Se os dados não permitirem uma conclusão, declare a limitação.
 - Escreva em português claro, sem criar leis, testes, empresas, concorrentes ou resultados que não apareçam nas fontes.
 
@@ -310,7 +358,7 @@ def _delete_history(item_id):
 def _render_history():
     st.divider()
     st.subheader("🗂️ Histórico de pareceres de patenteabilidade")
-    st.caption("Pareceres e respostas filtradas do CSV ficam salvos no Supabase.")
+    st.caption("Pareceres e respostas filtradas da planilha ficam salvos no Supabase.")
     busca = st.text_input(
         "🔎 Buscar por número do processo / PI",
         key="busca_historico_parecer",
@@ -325,21 +373,21 @@ def _render_history():
             row_id = row.get("id")
             date = str(row.get("criado_em") or "")[:19].replace("T", " ")
             number = row.get("numero_patente") or "Sem número informado"
-            document = row.get("documento_nome") or "Sem CSV"
+            document = row.get("documento_nome") or "Sem planilha"
             with st.expander(f"{date} — {number} — {document}"):
                 st.markdown(f"**Processo / PI:** {number}")
-                st.markdown(f"**CSV:** {document}")
+                st.markdown(f"**Planilha:** {document}")
                 st.markdown(f"**Modelo de IA:** {row.get('modelo') or '-'}")
                 st.markdown("**Observações da reunião:**")
                 st.write(row.get("observacoes_reuniao") or "Nenhuma observação registrada.")
-                st.markdown("**Respostas do CSV usadas:**")
+                st.markdown("**Respostas da planilha usadas:**")
                 with st.expander("Ver perguntas e respostas filtradas"):
                     st.text_area(
                         "Respostas",
                         row.get("formulario_extraido") or "",
                         height=280,
                         disabled=True,
-                        key=f"csv_hist_{row_id}",
+                        key=f"planilha_hist_{row_id}",
                     )
                 st.markdown("**Parecer gerado:**")
                 st.markdown(row.get("parecer_gerado") or "-")
@@ -390,12 +438,12 @@ def _render_result():
 
 def render():
     st.title("⚖️ Parecer de Patenteabilidade – NIT/IFSC")
-    st.caption("Carregue o CSV do formulário. A linha de perguntas será associada à linha de respostas.")
+    st.caption("Carregue a planilha do formulário. A linha de perguntas será associada à linha de respostas.")
 
     arquivo = st.file_uploader(
-        "📊 CSV do Formulário de Notificação de Invenção",
-        type=["csv"],
-        key="csv_patenteabilidade",
+        "📊 Planilha do Formulário de Notificação de Invenção (.ods ou .xml)",
+        type=["ods", "xml"],
+        key="planilha_patenteabilidade",
     )
     numero = st.text_input("Número do processo / PI (opcional)", key="parecer_numero")
     notas = st.text_area(
@@ -412,9 +460,9 @@ def render():
         return
 
     try:
-        all_pairs = _read_csv(arquivo)
+        all_pairs = _read_spreadsheet(arquivo)
     except Exception as exc:
-        st.error(f"Não foi possível ler o CSV: {exc}")
+        st.error(f"Não foi possível ler a planilha: {exc}")
         _render_history()
         return
 
@@ -422,7 +470,7 @@ def render():
     if patent_form is not True:
         st.error(
             "Este módulo gera parecer somente quando a resposta ao campo 'Invenção' identifica "
-            "um pedido de patente ou modelo de utilidade. Confira o tipo da criação no CSV."
+            "um pedido de patente ou modelo de utilidade. Confira o tipo da criação na planilha."
         )
         _render_history()
         _render_result()
@@ -439,12 +487,6 @@ def render():
     with st.expander("🔎 Conferir respostas que serão enviadas para análise", expanded=True):
         import pandas as pd
         st.dataframe(pd.DataFrame(selected_pairs), use_container_width=True, hide_index=True)
-        st.download_button(
-            "Baixar respostas filtradas (.csv)",
-            pd.DataFrame(selected_pairs).to_csv(index=False).encode("utf-8-sig"),
-            "respostas_formulario_filtradas.csv",
-            "text/csv",
-        )
 
     signature = hashlib.sha256(
         arquivo.getvalue()
