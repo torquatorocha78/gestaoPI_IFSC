@@ -2,6 +2,7 @@ import hashlib
 import io
 import os
 import re
+import time
 import unicodedata
 from datetime import datetime
 
@@ -162,21 +163,44 @@ def _format_pairs(pairs):
 
 
 def _groq_request(api_key, messages, max_tokens):
-    response = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": MODEL,
-            "temperature": 0.1,
-            "max_tokens": max_tokens,
-            "messages": messages,
-        },
-        timeout=120,
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"Groq retornou {response.status_code}: {response.text}")
-    content = response.json()["choices"][0]["message"].get("content") or ""
-    return content.strip()
+    request_body = {
+        "model": MODEL,
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    for attempt in range(3):
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=request_body,
+            timeout=120,
+        )
+        if response.status_code == 429 and attempt < 2:
+            retry_after = response.headers.get("retry-after")
+            reset_tokens = response.headers.get("x-ratelimit-reset-tokens")
+            delay = None
+            for value in (retry_after, reset_tokens):
+                if value:
+                    match = re.search(r"([0-9]+(?:\.[0-9]+)?)", value)
+                    if match:
+                        delay = float(match.group(1))
+                        break
+            if delay is None:
+                match = re.search(r"try again in ([0-9]+(?:\.[0-9]+)?)s", response.text, flags=re.I)
+                delay = float(match.group(1)) if match else 15.0
+            delay = min(max(delay + 1.0, 1.0), 60.0)
+            st.info(f"Limite temporário da Groq. Vou tentar novamente em {delay:.0f} segundos…")
+            time.sleep(delay)
+            continue
+        if response.status_code >= 400:
+            raise RuntimeError(f"Groq retornou {response.status_code}: {response.text}")
+        content = response.json()["choices"][0]["message"].get("content") or ""
+        return content.strip()
+
+    raise RuntimeError("A Groq manteve o limite de tokens ativo após novas tentativas. Aguarde e tente novamente.")
 
 
 def _call_groq(form_answers, meeting_notes):
@@ -222,7 +246,7 @@ Redija o parecer usando as respostas específicas acima nas seções corresponde
     result = _groq_request(
         api_key,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        max_tokens=3500,
+        max_tokens=2600,
     )
     if not result:
         raise RuntimeError("A IA retornou um parecer vazio. Tente novamente.")
