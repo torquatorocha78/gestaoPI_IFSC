@@ -25,9 +25,12 @@ SUPABASE_URL = _get_secret(
     "https://ptxtclyfwlcwqgwzqieu.supabase.co",
 ).rstrip("/")
 
-# Aceita os nomes mais comuns usados no Streamlit/Supabase.
+# Chave privilegiada primeiro: este módulo roda no backend Streamlit e a
+# política RLS do projeto exige a chave secreta/service_role para gravar.
 SUPABASE_KEY = (
-    _get_secret("SUPABASE_KEY")
+    _get_secret("SUPABASE_SECRET_KEY")
+    or _get_secret("SUPABASE_SERVICE_ROLE_KEY")
+    or _get_secret("SUPABASE_KEY")
     or _get_secret("SUPABASE_PUBLISHABLE_KEY")
     or _get_secret("SUPABASE_ANON_KEY")
 )
@@ -38,9 +41,12 @@ SUPABASE_TABLE = _get_secret("SUPABASE_TABLE", "patentes")
 def _headers(prefer: Optional[str] = None) -> Dict[str, str]:
     headers = {
         "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
     }
+    # As chaves novas sb_secret_/sb_publishable_ vão no apikey. Só as chaves
+    # JWT legadas (anon/service_role) devem ser repetidas como Bearer.
+    if SUPABASE_KEY and not SUPABASE_KEY.startswith("sb_"):
+        headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
     if prefer:
         headers["Prefer"] = prefer
     return headers
