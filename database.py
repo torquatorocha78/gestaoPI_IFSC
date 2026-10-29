@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import unicodedata
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,40 +21,60 @@ def _get_secret(nome: str, padrao: str = "") -> str:
         return padrao
 
 
-SUPABASE_URL = _get_secret(
-    "SUPABASE_URL",
-    "https://ptxtclyfwlcwqgwzqieu.supabase.co",
-).rstrip("/")
+def _normalizar_url_supabase(valor: str) -> str:
+    """Aceita a URL do projeto; remove barra final ou /rest/v1 acidental."""
+    url = (valor or "").strip().strip('"').strip("'").rstrip("/")
+    url = re.sub(r"/rest/v1$", "", url, flags=re.I)
+    return url
 
-# Chave privilegiada primeiro: este módulo roda no backend Streamlit e a
-# política RLS do projeto exige a chave secreta/service_role para gravar.
+
+SUPABASE_URL = _normalizar_url_supabase(_get_secret("SUPABASE_URL"))
+
+# Aceita os nomes mais comuns usados no Streamlit/Supabase.
 SUPABASE_KEY = (
-    _get_secret("SUPABASE_SECRET_KEY")
-    or _get_secret("SUPABASE_SERVICE_ROLE_KEY")
-    or _get_secret("SUPABASE_KEY")
+    _get_secret("SUPABASE_KEY")
     or _get_secret("SUPABASE_PUBLISHABLE_KEY")
     or _get_secret("SUPABASE_ANON_KEY")
 )
 
-SUPABASE_TABLE = _get_secret("SUPABASE_TABLE", "patentes")
+SUPABASE_TABLE = (_get_secret("SUPABASE_TABLE", "patentes") or "patentes").strip().strip('"').strip("'")
+ALLOWED_TABLES = {
+    "patentes", "anuidades", "pareceres_patenteabilidade",
+    "historico_consultas_juridicas"
+}
 
 
 def _headers(prefer: Optional[str] = None) -> Dict[str, str]:
     headers = {
         "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
     }
-    # As chaves novas sb_secret_/sb_publishable_ vão no apikey. Só as chaves
-    # JWT legadas (anon/service_role) devem ser repetidas como Bearer.
-    if SUPABASE_KEY and not SUPABASE_KEY.startswith("sb_"):
-        headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
     if prefer:
         headers["Prefer"] = prefer
     return headers
 
 
 def _endpoint(table: str = SUPABASE_TABLE) -> str:
-    return f"{SUPABASE_URL}/rest/v1/{table}"
+    """Monta endpoints PostgREST sem aceitar caminhos acidentais nos Secrets."""
+    if not SUPABASE_URL or not SUPABASE_URL.startswith(("https://", "http://")):
+        raise RuntimeError(
+            "SUPABASE_URL ausente ou inválida. Informe a URL raiz do projeto, "
+            "por exemplo https://SEU-PROJETO.supabase.co"
+        )
+    if not SUPABASE_KEY:
+        raise RuntimeError(
+            "Chave do Supabase ausente. Configure SUPABASE_PUBLISHABLE_KEY "
+            "ou SUPABASE_ANON_KEY nos Secrets do Streamlit."
+        )
+    nome_tabela = str(table or "").strip().strip("/")
+    if nome_tabela not in ALLOWED_TABLES:
+        raise RuntimeError(
+            f"Nome de tabela Supabase inválido: {nome_tabela!r}. "
+            "Use apenas patentes, anuidades, pareceres_patenteabilidade "
+            "ou historico_consultas_juridicas. Não inclua /rest/v1 na tabela."
+        )
+    return f"{SUPABASE_URL}/rest/v1/{nome_tabela}"
 
 
 def _supabase_error(response: requests.Response) -> str:
@@ -119,25 +140,10 @@ def _parse_data(valor: Any) -> Optional[str]:
         return None
     if hasattr(valor, "date") and not isinstance(valor, str):
         return valor.date().isoformat()
-    # Planilhas do INPI podem preencher colunas de data com marcadores textuais
-    # como "Não requerido". Nunca encaminhar esses textos para colunas DATE.
-    marcadores_sem_data = {
-        "nao_requerido",
-        "nao_requerida",
-        "nao_aplicavel",
-        "nao_se_aplica",
-        "n_a",
-        "na",
-        "-",
-    }
-    if _normalizar_texto(valor) in marcadores_sem_data:
-        return None
     try:
         return pd.to_datetime(str(valor).strip(), dayfirst=True, errors="raise").date().isoformat()
     except Exception:
-        # Um texto que não pôde ser interpretado não é uma data. Retorná-lo
-        # como string causaria erro 22007 no Supabase e rejeitaria o registro.
-        return None
+        return str(valor).strip() or None
 
 
 def _normalizar_status(status: Any) -> str:
