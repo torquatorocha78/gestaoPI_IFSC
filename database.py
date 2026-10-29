@@ -1,6 +1,5 @@
 import os
 import json
-import re
 import unicodedata
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,14 +20,10 @@ def _get_secret(nome: str, padrao: str = "") -> str:
         return padrao
 
 
-def _normalizar_url_supabase(valor: str) -> str:
-    """Aceita a URL do projeto; remove barra final ou /rest/v1 acidental."""
-    url = (valor or "").strip().strip('"').strip("'").rstrip("/")
-    url = re.sub(r"/rest/v1$", "", url, flags=re.I)
-    return url
-
-
-SUPABASE_URL = _normalizar_url_supabase(_get_secret("SUPABASE_URL"))
+SUPABASE_URL = _get_secret(
+    "SUPABASE_URL",
+    "https://ptxtclyfwlcwqgwzqieu.supabase.co",
+).rstrip("/")
 
 # Aceita os nomes mais comuns usados no Streamlit/Supabase.
 SUPABASE_KEY = (
@@ -37,11 +32,7 @@ SUPABASE_KEY = (
     or _get_secret("SUPABASE_ANON_KEY")
 )
 
-SUPABASE_TABLE = (_get_secret("SUPABASE_TABLE", "patentes") or "patentes").strip().strip('"').strip("'")
-ALLOWED_TABLES = {
-    "patentes", "anuidades", "pareceres_patenteabilidade",
-    "historico_consultas_juridicas"
-}
+SUPABASE_TABLE = _get_secret("SUPABASE_TABLE", "patentes")
 
 
 def _headers(prefer: Optional[str] = None) -> Dict[str, str]:
@@ -56,25 +47,7 @@ def _headers(prefer: Optional[str] = None) -> Dict[str, str]:
 
 
 def _endpoint(table: str = SUPABASE_TABLE) -> str:
-    """Monta endpoints PostgREST sem aceitar caminhos acidentais nos Secrets."""
-    if not SUPABASE_URL or not SUPABASE_URL.startswith(("https://", "http://")):
-        raise RuntimeError(
-            "SUPABASE_URL ausente ou inválida. Informe a URL raiz do projeto, "
-            "por exemplo https://SEU-PROJETO.supabase.co"
-        )
-    if not SUPABASE_KEY:
-        raise RuntimeError(
-            "Chave do Supabase ausente. Configure SUPABASE_PUBLISHABLE_KEY "
-            "ou SUPABASE_ANON_KEY nos Secrets do Streamlit."
-        )
-    nome_tabela = str(table or "").strip().strip("/")
-    if nome_tabela not in ALLOWED_TABLES:
-        raise RuntimeError(
-            f"Nome de tabela Supabase inválido: {nome_tabela!r}. "
-            "Use apenas patentes, anuidades, pareceres_patenteabilidade "
-            "ou historico_consultas_juridicas. Não inclua /rest/v1 na tabela."
-        )
-    return f"{SUPABASE_URL}/rest/v1/{nome_tabela}"
+    return f"{SUPABASE_URL}/rest/v1/{table}"
 
 
 def _supabase_error(response: requests.Response) -> str:
@@ -220,8 +193,6 @@ def _preparar_patentes(df: pd.DataFrame) -> pd.DataFrame:
         "custo_manutencao_ano_base": ("custo_manutencao_ano_base", "custo manutencao ano base", "custo manutenção ano-base"),
         "data_manutencao": ("data_manutencao", "data manutencao", "data manutenção"),
         "formict_ano_base": ("formict_ano_base", "ano base formict", "ano-base formict"),
-        "processo_sipac": ("processo_sipac", "processo sipac"),
-        "servidor_responsavel": ("servidor_responsavel", "servidor responsável", "servidor responsavel"),
     })
 
     for destino, nomes in aliases.items():
@@ -308,8 +279,6 @@ def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
         "custo_manutencao_ano_base": dados.get("custo_manutencao_ano_base"),
         "data_manutencao": _parse_data(dados.get("data_manutencao")),
         "formict_ano_base": dados.get("formict_ano_base"),
-        "processo_sipac": dados.get("processo_sipac"),
-        "servidor_responsavel": dados.get("servidor_responsavel"),
     }
     return {chave: _valor_limpo(valor) for chave, valor in payload.items() if _valor_limpo(valor) is not None}
 
@@ -504,10 +473,6 @@ def atualizar_status_anuidade(
     numero_anuidade: int,
     novo_status: str,
     data_pagamento: Optional[str] = None,
-    gru: Optional[str] = None,
-    valor_pagamento: Optional[float] = None,
-    processo_sipac: Optional[str] = None,
-    servidor_responsavel: Optional[str] = None,
 ) -> None:
     """Atualiza ou cria o registro da anuidade sem depender de constraint UNIQUE."""
     try:
@@ -524,15 +489,6 @@ def atualizar_status_anuidade(
             "status": novo_status,
             "data_pagamento": _parse_data(data_pagamento) if data_pagamento else None,
         }
-        # Metadados financeiros opcionais; dependem das colunas criadas pelo SQL de atualização.
-        if gru is not None and str(gru).strip():
-            payload["gru"] = str(gru).strip()
-        if valor_pagamento is not None:
-            payload["valor_pagamento"] = float(valor_pagamento)
-        if processo_sipac is not None and str(processo_sipac).strip():
-            payload["processo_sipac"] = str(processo_sipac).strip()
-        if servidor_responsavel is not None and str(servidor_responsavel).strip():
-            payload["servidor_responsavel"] = str(servidor_responsavel).strip()
 
         if existente:
             registro_id = existente[0].get("id")
