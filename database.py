@@ -222,7 +222,7 @@ def init_database() -> None:
 def obter_patentes() -> pd.DataFrame:
     data = _request(
         "GET",
-        f"{_endpoint()}?select=*&order=id.asc",
+        f"{_endpoint()}?select=*&order=numero_patente.asc",
         headers=_headers(),
     )
     df = pd.DataFrame(data or [])
@@ -230,7 +230,7 @@ def obter_patentes() -> pd.DataFrame:
 
 
 def _patente_url(patente_id: Any) -> str:
-    return f"{_endpoint()}?id=eq.{quote(str(patente_id), safe='')}"
+    return f"{_endpoint()}?numero_patente=eq.{quote(str(patente_id), safe='')}"
 
 
 def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
@@ -302,7 +302,7 @@ def _calcular_cronograma(data_dep: str, modalidade_pi: Any) -> List[Dict[str, An
         fim_ext = ini_ext + pd.DateOffset(months=6)
         cronograma.append({
             "id": f"{numero}",
-            "patente_id": None,
+            "numero_patente": None,
             "numero_anuidade": numero,
             "descricao_pagamento": descricao,
             "data_inicio_ordinario": ini_ord.date().isoformat(),
@@ -407,7 +407,7 @@ def obter_anuidades(patente_id: Any) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    match = df[df["id"].astype(str) == str(patente_id)]
+    match = df[df["numero_patente"].astype(str) == str(patente_id)]
     if match.empty:
         return pd.DataFrame()
 
@@ -419,13 +419,13 @@ def obter_anuidades(patente_id: Any) -> pd.DataFrame:
     resultado = pd.DataFrame(_calcular_cronograma(data_dep, pi.get("modalidade_pi")))
     if resultado.empty:
         return resultado
-    resultado["patente_id"] = patente_id
+    resultado["numero_patente"] = patente_id
 
     # Recupera os registros efetivamente gravados na tabela anuidades.
     try:
         persistidos = _request(
             "GET",
-            f"{SUPABASE_URL}/rest/v1/anuidades?select=*&patente_id=eq.{quote(str(patente_id), safe='')}&order=numero_anuidade.asc",
+            f"{SUPABASE_URL}/rest/v1/anuidades?select=*&numero_patente=eq.{quote(str(patente_id), safe='')}&order=numero_anuidade.asc",
             headers=_headers(),
         )
     except Exception:
@@ -479,12 +479,12 @@ def atualizar_status_anuidade(
         filtro_id = quote(str(patente_id), safe="")
         existente = _request(
             "GET",
-            f"{SUPABASE_URL}/rest/v1/anuidades?select=id&patente_id=eq.{filtro_id}&numero_anuidade=eq.{int(numero_anuidade)}&limit=1",
+            f"{SUPABASE_URL}/rest/v1/anuidades?select=id&numero_patente=eq.{filtro_id}&numero_anuidade=eq.{int(numero_anuidade)}&limit=1",
             headers=_headers(),
         )
 
         payload = {
-            "patente_id": patente_id,
+            "numero_patente": patente_id,
             "numero_anuidade": int(numero_anuidade),
             "status": novo_status,
             "data_pagamento": _parse_data(data_pagamento) if data_pagamento else None,
@@ -516,6 +516,128 @@ def atualizar_status_anuidade(
 
 def deletar_patente(patente_id: Any) -> None:
     _request("DELETE", _patente_url(patente_id), headers=_headers("return=minimal"))
+
+
+
+def obter_inventores() -> pd.DataFrame:
+    data = _request("GET", f"{_endpoint('inventores')}?select=*&order=nome.asc", headers=_headers())
+    return pd.DataFrame(data or [])
+
+
+def adicionar_inventor(nome: str, cpf: Optional[str] = None, endereco: Optional[str] = None,
+                        instituicao: Optional[str] = None, telefone: Optional[str] = None,
+                        email: Optional[str] = None) -> Tuple[bool, str]:
+    try:
+        payload = {k: _valor_limpo(v) for k, v in {
+            "nome": nome, "cpf": cpf, "endereco": endereco,
+            "instituicao": instituicao, "telefone": telefone, "email": email
+        }.items() if _valor_limpo(v) is not None}
+        if not payload.get("nome"):
+            return False, "Nome do inventor é obrigatório."
+        _request("POST", _endpoint("inventores"), headers=_headers("return=minimal"), json=payload)
+        return True, "Inventor cadastrado com sucesso."
+    except Exception as exc:
+        return False, f"Erro ao cadastrar inventor: {exc}"
+
+
+def atualizar_inventor(inventor_id: Any, **dados: Any) -> Tuple[bool, str]:
+    try:
+        payload = {k: _valor_limpo(v) for k, v in dados.items() if _valor_limpo(v) is not None}
+        _request("PATCH", f"{_endpoint('inventores')}?id=eq.{quote(str(inventor_id), safe='')}",
+                 headers=_headers("return=minimal"), json=payload)
+        return True, "Inventor atualizado com sucesso."
+    except Exception as exc:
+        return False, f"Erro ao atualizar inventor: {exc}"
+
+
+def excluir_inventor(inventor_id: Any) -> Tuple[bool, str]:
+    try:
+        _request("DELETE", f"{_endpoint('inventores')}?id=eq.{quote(str(inventor_id), safe='')}",
+                 headers=_headers("return=minimal"))
+        return True, "Inventor excluído com sucesso."
+    except Exception as exc:
+        return False, f"Erro ao excluir inventor: {exc}"
+
+
+def obter_inventores_pi(numero_patente: str) -> pd.DataFrame:
+    if not numero_patente:
+        return pd.DataFrame()
+    url = (f"{_endpoint('patente_inventor')}?select=ordem,inventor_id,inventores(*)&"
+           f"numero_patente=eq.{quote(str(numero_patente), safe='')}&order=ordem.asc")
+    try:
+        data = _request("GET", url, headers=_headers()) or []
+        rows=[]
+        for x in data:
+            inv=x.get("inventores") or {}
+            inv["ordem"]=x.get("ordem")
+            inv["inventor_id"]=x.get("inventor_id")
+            rows.append(inv)
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame()
+
+
+def definir_inventores_pi(numero_patente: str, inventor_ids: List[Any]) -> Tuple[bool, str]:
+    try:
+        _request("DELETE", f"{_endpoint('patente_inventor')}?numero_patente=eq.{quote(str(numero_patente), safe='')}",
+                 headers=_headers("return=minimal"))
+        rows=[]
+        for ordem, iid in enumerate(inventor_ids, 1):
+            rows.append({"numero_patente": numero_patente, "inventor_id": int(iid), "ordem": ordem})
+        if rows:
+            _request("POST", _endpoint("patente_inventor"), headers=_headers("return=minimal"), json=rows)
+        return True, "Inventores da PI atualizados."
+    except Exception as exc:
+        return False, f"Erro ao vincular inventores: {exc}"
+
+
+def importar_inventores_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
+    try:
+        df=pd.read_excel(arquivo_excel)
+    except Exception as exc:
+        return [("ARQUIVO", False, f"Falha ao ler a planilha: {exc}")]
+    cols={_normalizar_texto(c):c for c in df.columns}
+    def col(*names):
+        for n in names:
+            if _normalizar_texto(n) in cols: return cols[_normalizar_texto(n)]
+        return None
+    mapa={
+        "nome":col("nome"), "cpf":col("cpf"), "endereco":col("endereco","endereço"),
+        "instituicao":col("instituicao","instituição"), "telefone":col("telefone"), "email":col("email")}
+    if not mapa["nome"]:
+        return [("PLANILHA", False, "A coluna 'Nome' é obrigatória.")]
+    resultados=[]
+    for idx,row in df.iterrows():
+        nome=_valor_limpo(row.get(mapa["nome"]))
+        if not nome:
+            resultados.append((f"Linha {idx+2}",False,"Nome não informado.")); continue
+        dados={k:_valor_limpo(row.get(c)) if c else None for k,c in mapa.items()}
+        cpf=dados.get("cpf")
+        try:
+            if cpf:
+                q=quote(str(cpf), safe="")
+                ex=_request("GET",f"{_endpoint('inventores')}?select=id&cpf=eq.{q}&limit=1",headers=_headers())
+            else:
+                q=quote(str(nome), safe="")
+                ex=_request("GET",f"{_endpoint('inventores')}?select=id&nome=eq.{q}&limit=1",headers=_headers())
+            if ex:
+                _request("PATCH",f"{_endpoint('inventores')}?id=eq.{ex[0]['id']}",headers=_headers("return=minimal"),json={k:v for k,v in dados.items() if v is not None})
+                resultados.append((str(nome),True,"Inventor existente atualizado."))
+            else:
+                adicionar_inventor(**dados)
+                resultados.append((str(nome),True,"Novo inventor importado."))
+        except Exception as exc:
+            resultados.append((str(nome),False,str(exc)))
+    return resultados
+
+
+def exportar_inventores_excel() -> bytes:
+    from io import BytesIO
+    df=obter_inventores()
+    out=BytesIO()
+    with pd.ExcelWriter(out,engine="openpyxl") as writer:
+        df.to_excel(writer,index=False,sheet_name="Inventores")
+    return out.getvalue()
 
 
 def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
@@ -714,9 +836,15 @@ def buscar_contexto_ativo_pi(ativo_pi_id: Any = None) -> pd.DataFrame:
         filtro = quote(str(ativo_pi_id), safe="")
         data = _request(
             "GET",
-            f"{_endpoint('patentes')}?select=*&id=eq.{filtro}&limit=1",
+            f"{_endpoint('patentes')}?select=*&numero_patente=eq.{filtro}&limit=1",
             headers=_headers(),
         )
+        if not data:
+            data = _request(
+                "GET",
+                f"{_endpoint('patentes')}?select=*&id=eq.{filtro}&limit=1",
+                headers=_headers(),
+            )
         return _preparar_patentes(pd.DataFrame(data or []))
     except Exception as exc:
         raise RuntimeError(
@@ -733,7 +861,7 @@ def obter_obrigacoes_ativo(ativo_id: Any = None) -> pd.DataFrame:
         filtro = quote(str(ativo_id), safe="")
         data = _request(
             "GET",
-            f"{_endpoint('anuidades')}?select=*&patente_id=eq.{filtro}&order=numero_anuidade.asc",
+            f"{_endpoint('anuidades')}?select=*&numero_patente=eq.{filtro}&order=numero_anuidade.asc",
             headers=_headers(),
         )
         return pd.DataFrame(data or [])
@@ -741,3 +869,52 @@ def obter_obrigacoes_ativo(ativo_id: Any = None) -> pd.DataFrame:
         raise RuntimeError(
             f"Não foi possível carregar as obrigações da PI: {exc}"
         ) from exc
+
+
+# ============================================================
+# PARECERES DE PATENTEABILIDADE – HISTÓRICO
+# ============================================================
+def registrar_parecer_patenteabilidade(
+    numero_patente=None,
+    documento_nome=None,
+    formulario_extraido=None,
+    observacoes_reuniao=None,
+    parecer_gerado=None,
+    modelo=None,
+):
+    try:
+        payload = {
+            "numero_patente": _valor_limpo(numero_patente),
+            "documento_nome": _valor_limpo(documento_nome),
+            "formulario_extraido": _valor_limpo(formulario_extraido),
+            "observacoes_reuniao": _valor_limpo(observacoes_reuniao),
+            "parecer_gerado": _valor_limpo(parecer_gerado),
+            "modelo": _valor_limpo(modelo),
+        }
+        payload = {k:v for k,v in payload.items() if v is not None}
+        _request("POST", _endpoint("pareceres_patenteabilidade"), headers=_headers("return=minimal"), json=payload)
+        return True, "Parecer de patenteabilidade salvo no histórico do Supabase."
+    except Exception as exc:
+        return False, f"Erro ao salvar parecer no histórico: {exc}"
+
+
+def obter_historico_pareceres_patenteabilidade(limite=100, numero_patente=None):
+    try:
+        limite = max(1, min(int(limite), 500))
+        params = f"select=*&order=criado_em.desc&limit={limite}"
+        if numero_patente:
+            params += f"&numero_patente=eq.{quote(str(numero_patente), safe='')}"
+        data = _request("GET", f"{_endpoint('pareceres_patenteabilidade')}?{params}", headers=_headers())
+        return pd.DataFrame(data or [])
+    except Exception as exc:
+        raise RuntimeError(f"Não foi possível consultar o histórico de pareceres: {exc}") from exc
+
+
+def excluir_parecer_patenteabilidade(parecer_id):
+    try:
+        if parecer_id is None or str(parecer_id).strip() == "":
+            return False, "ID do parecer não informado."
+        _request("DELETE", f"{_endpoint('pareceres_patenteabilidade')}?id=eq.{quote(str(parecer_id), safe='')}", headers=_headers("return=minimal"))
+        return True, "Parecer excluído do histórico."
+    except Exception as exc:
+        return False, f"Erro ao excluir parecer: {exc}"
