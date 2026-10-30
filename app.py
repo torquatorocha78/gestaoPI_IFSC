@@ -67,6 +67,24 @@ def status_pagamento(row):
     )
 
 
+def gestor_ifsc(gestor):
+    chave = db._normalizar_texto(gestor)
+    nomes_ifsc = {
+        "ifsc",
+        "instituto_federal_de_santa_catarina",
+        "instituto_federal_de_ciencia_e_tecnologia",
+        "instituto_federal_de_ciencia_e_tecnologia_de_santa_catarina",
+        "instituto_federal_de_educacao_ciencia_e_tecnologia",
+        "instituto_federal_de_educacao_ciencia_e_tecnologia_de_santa_catarina",
+    }
+    return chave in nomes_ifsc
+
+
+def status_impede_pagamento(status):
+    chave = db._normalizar_texto(status)
+    return any(termo in chave for termo in ("indefer", "descontinu", "arquiv"))
+
+
 def label_pagamento(modalidade):
     if modalidade == "Software":
         return "Taxa"
@@ -79,162 +97,106 @@ def label_pagamento(modalidade):
 
 def montar_linhas_dashboard(df_pis, modalidade):
     hoje = datetime.now().date()
-    linhas = []
+    linhas_pagar = []
+    linhas_nao_pagar = []
 
     for _, pi in df_pis.iterrows():
+        gestor = pi.get("gestor")
+        status_pi = pi.get("status") or pi.get("status_patente") or "Ativo"
+        if status_impede_pagamento(status_pi):
+            linhas_nao_pagar.append({
+                "Processo": pi.get("numero_patente", ""),
+                "Título": pi.get("titulo") or "-",
+                "Status da PI": status_pi,
+                "Classificação": "⛔ NÃO PAGAR",
+                "Gestor": gestor,
+                "Campus": pi.get("campus") or "-",
+            })
+            continue
+
+        if not gestor_ifsc(gestor):
+            continue
 
         pagamentos = db.obter_anuidades(pi["numero_patente"])
-
         for _, pgto in pagamentos.iterrows():
-
-            if pgto.get("status") == "nao_pagar":
+            if pgto.get("status") == "nao_pagar" or pgto.get("data_pagamento"):
                 continue
 
-            if pgto.get("data_pagamento"):
-                continue
-
-            inicio_ord = utils._para_data(
-                pgto.get("data_inicio_ordinario")
-            )
-
-            fim_ord = utils._para_data(
-                pgto.get("data_fim_ordinario")
-            )
-
-            if not inicio_ord or not fim_ord:
-                continue
-
-            if not (inicio_ord <= hoje <= fim_ord):
+            inicio_ord = utils._para_data(pgto.get("data_inicio_ordinario"))
+            fim_ord = utils._para_data(pgto.get("data_fim_ordinario"))
+            if not inicio_ord or not fim_ord or not (inicio_ord <= hoje <= fim_ord):
                 continue
 
             dias = (fim_ord - hoje).days
-
-            status = "amarelo" if dias <= 30 else "verde"
-
-            linhas.append({
+            status_prazo = "amarelo" if dias <= 30 else "verde"
+            linhas_pagar.append({
                 "ID": pi.get("id_externo") or pi["id"],
                 "Processo": pi["numero_patente"],
                 "Título": pi.get("titulo") or "-",
-                label_pagamento(modalidade):
-                    pgto.get("descricao_pagamento")
-                    or pgto.get("numero_anuidade"),
-                "Fim Prazo Ordinário":
-                    utils.formatar_data(
-                        pgto.get("data_fim_ordinario")
-                    ),
+                label_pagamento(modalidade): (
+                    pgto.get("descricao_pagamento") or pgto.get("numero_anuidade")
+                ),
+                "Fim Prazo Ordinário": utils.formatar_data(pgto.get("data_fim_ordinario")),
                 "Dias p/ Vencer": dias,
-                "Status":
-                    f"{utils.criar_emoji_status(status)} "
-                    f"{status.upper()}",
-                "Gestor": pi.get("gestor") or "N/A",
+                "Status": f"{utils.criar_emoji_status(status_prazo)} {status_prazo.upper()}",
+                "Gestor": gestor,
                 "Campus": pi.get("campus") or "-",
             })
 
-    return linhas
+    return linhas_pagar, linhas_nao_pagar
 
 
 def dashboard_modalidade(titulo, modalidade):
-
     st.title(titulo)
-
     df = db.obter_patentes()
-
     if df.empty:
         st.info("Nenhuma PI cadastrada ainda.")
         return
 
     df_tipo = df[
-        df["modalidade_pi"]
-        .apply(db.normalizar_modalidade)
-        == modalidade
+        df["modalidade_pi"].apply(db.normalizar_modalidade) == modalidade
     ].copy()
-
-    linhas = montar_linhas_dashboard(
-        df_tipo,
-        modalidade
-    )
-
+    df_ifsc = df_tipo[df_tipo["gestor"].apply(gestor_ifsc)]
+    linhas, linhas_nao_pagar = montar_linhas_dashboard(df_tipo, modalidade)
     df_dash = pd.DataFrame(linhas)
+    df_nao_pagar = pd.DataFrame(linhas_nao_pagar)
 
     col1, col2, col3, col4 = st.columns(4)
-
     with col1:
-        st.metric(
-            "📚 Total",
-            len(df_tipo)
-        )
-
+        st.metric("📚 Total IFSC", len(df_ifsc))
     with col2:
-        st.metric(
-            "📅 Em prazo ordinário",
-            len(df_dash)
-        )
-
+        st.metric("📅 Em prazo ordinário", len(df_dash))
     with col3:
-        st.metric(
-            "✅ Normal",
-            0
-            if df_dash.empty
-            else int(
-                df_dash["Status"]
-                .str.contains("✅")
-                .sum()
-            )
-        )
-
+        st.metric("✅ Normal", 0 if df_dash.empty else int(df_dash["Status"].str.contains("✅").sum()))
     with col4:
-        st.metric(
-            "⚠️ Atenção",
-            0
-            if df_dash.empty
-            else int(
-                df_dash["Status"]
-                .str.contains("⚠️")
-                .sum()
-            )
-        )
+        st.metric("⚠️ Atenção", 0 if df_dash.empty else int(df_dash["Status"].str.contains("⚠️").sum()))
 
     st.divider()
-
     subtitulo = {
-        "Patente":
-            "Anuidades de patentes em prazo ordinário",
-
-        "Desenho Industrial":
-            "Depósito e quinquênios de desenhos industriais em prazo ordinário",
-
-        "Software":
-            "Taxas únicas de software em prazo ordinário",
+        "Patente": "Anuidades de patentes em prazo ordinário",
+        "Desenho Industrial": "Depósito e quinquênios de desenhos industriais em prazo ordinário",
+        "Software": "Taxas únicas de software em prazo ordinário",
     }[modalidade]
-
     st.subheader(subtitulo)
 
     if df_dash.empty:
-        st.info(
-            "Nenhum pagamento desta modalidade "
-            "está em prazo ordinário neste momento."
+        st.info("Nenhum pagamento desta modalidade está em prazo ordinário neste momento.")
+    else:
+        def colorir(row):
+            cor = "#ffffcc" if "⚠️" in str(row["Status"]) else "#ccffcc"
+            return [f"background-color: {cor}"] * len(row)
+
+        st.dataframe(
+            df_dash.sort_values("Dias p/ Vencer").style.apply(colorir, axis=1),
+            use_container_width=True,
+            hide_index=True,
         )
-        return
 
-    def colorir(row):
-
-        if "⚠️" in str(row["Status"]):
-            return [
-                "background-color: #ffffcc"
-            ] * len(row)
-
-        return [
-            "background-color: #ccffcc"
-        ] * len(row)
-
-    st.dataframe(
-        df_dash
-        .sort_values("Dias p/ Vencer")
-        .style
-        .apply(colorir, axis=1),
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.subheader("Registros classificados como não pagar")
+    if df_nao_pagar.empty:
+        st.info("Não há registros IFSC com status indeferido, descontinuado ou arquivado.")
+    else:
+        st.dataframe(df_nao_pagar, use_container_width=True, hide_index=True)
 
 
 # ============================================================
