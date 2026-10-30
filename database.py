@@ -87,6 +87,16 @@ def _normalizar_texto(valor: Any) -> str:
     return "_".join(texto.split())
 
 
+def _modalidade_por_numero(numero: Any) -> Optional[str]:
+    """Reconhece os códigos INPI BR 51 (software) e BR 30 (desenho industrial)."""
+    codigo = "".join(c for c in str(numero or "").upper() if c.isalnum())
+    if codigo.startswith(("BR51", "51")):
+        return "Software"
+    if codigo.startswith(("BR30", "30")):
+        return "Desenho Industrial"
+    return None
+
+
 def normalizar_modalidade(modalidade: Any) -> str:
     chave = _normalizar_texto(modalidade)
     if "software" in chave or "programa" in chave:
@@ -118,12 +128,17 @@ def _parse_data(valor: Any) -> Optional[str]:
         return valor.date().isoformat()
     texto = str(valor).strip()
     marcador = _normalizar_texto(texto)
-    if marcador in {"nao se aplica", "nao aplicavel", "nao requerido", "nao informado", "n/a", "na", "-"}:
+    if marcador in {
+        "nao_se_aplica", "nao_aplicavel", "nao_requerido",
+        "nao_informado", "nao_se_aplica_neste_caso",
+        "n_a", "na", "-",
+    }:
         return None
     try:
         return pd.to_datetime(texto, dayfirst=True, errors="raise").date().isoformat()
     except Exception:
-        return texto or None
+        # Valor textual inválido em coluna de data não deve chegar ao PostgreSQL.
+        return None
 
 
 def _normalizar_status(status: Any) -> str:
@@ -211,7 +226,11 @@ def _preparar_patentes(df: pd.DataFrame) -> pd.DataFrame:
     if "id" not in df.columns:
         df["id"] = range(1, len(df) + 1)
 
-    df["modalidade_pi"] = df["modalidade_pi"].apply(normalizar_modalidade)
+    df["modalidade_pi"] = df.apply(
+        lambda row: _modalidade_por_numero(row.get("numero_patente"))
+        or normalizar_modalidade(row.get("modalidade_pi")),
+        axis=1,
+    )
     df["status"] = df["status"].fillna("Ativo").replace("", "Ativo")
 
     # Mantém também os campos específicos existentes no schema atual.
@@ -260,7 +279,10 @@ def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
         "campus": dados.get("campus"),
         "atributos": dados.get("atributos"),
         "id_externo": dados.get("id_externo"),
-        "modalidade_pi": normalizar_modalidade(dados.get("modalidade_pi")),
+        "modalidade_pi": (
+            _modalidade_por_numero(dados.get("numero") or dados.get("numero_patente"))
+            or normalizar_modalidade(dados.get("modalidade_pi"))
+        ),
         "ano": dados.get("ano"),
         "data_publicacao": _parse_data(dados.get("data_publicacao")),
         "data_exame": _parse_data(dados.get("data_exame")),
@@ -718,7 +740,10 @@ def importar_excel(arquivo_excel) -> List[Tuple[str, bool, str]]:
             "descricao":val("descricao"), "titular":val("titular"), "gestor":val("gestor"),
             "status_patente":_normalizar_status(val("status") or "Ativo"), "titulo":val("titulo"), "inventores":val("inventores"),
             "inventores_cpf":val("inventores_cpf"), "campus":val("campus"), "atributos":val("atributos"),
-            "modalidade_pi":normalizar_modalidade(val("modalidade_pi") or "Patente"), "ano":ano_val,
+            "modalidade_pi":(
+                _modalidade_por_numero(numero)
+                or normalizar_modalidade(val("modalidade_pi") or "Patente")
+            ), "ano":ano_val,
             "data_publicacao":_parse_data(val("data_publicacao")), "data_exame":_parse_data(val("data_exame")),
             "acordo_titularidade":val("acordo_titularidade"), "procuracao":val("procuracao"), "termo_cessao":val("termo_cessao"),
             "ipc_classificacao":val("ipc_classificacao"), "trl":val("trl"), "observacoes_formict":val("observacoes_formict"),
