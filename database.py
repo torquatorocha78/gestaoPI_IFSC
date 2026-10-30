@@ -312,7 +312,11 @@ def _payload_patente(dados: Dict[str, Any]) -> Dict[str, Any]:
     return {chave: _valor_limpo(valor) for chave, valor in payload.items() if _valor_limpo(valor) is not None}
 
 def _calcular_cronograma(data_dep: str, modalidade_pi: Any) -> List[Dict[str, Any]]:
-    inicio = pd.to_datetime(data_dep)
+    data_dep_iso = _parse_data(data_dep)
+    if not data_dep_iso:
+        raise ValueError(f"Data de depósito inválida: {data_dep!r}")
+    # Normaliza datas brasileiras ambíguas antes de calcular os aniversários.
+    inicio = pd.to_datetime(data_dep_iso, format="%Y-%m-%d", errors="raise")
     modalidade = normalizar_modalidade(modalidade_pi)
 
     if modalidade == "Software":
