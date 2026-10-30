@@ -26,8 +26,11 @@ SUPABASE_URL = _get_secret(
 ).rstrip("/")
 
 # Aceita os nomes mais comuns usados no Streamlit/Supabase.
+# Chave privilegiada somente no servidor; nunca exponha em código cliente.
+# Quando configurada, permite operações administrativas sem depender de políticas RLS.
 SUPABASE_KEY = (
-    _get_secret("SUPABASE_KEY")
+    _get_secret("SUPABASE_SERVICE_ROLE_KEY")
+    or _get_secret("SUPABASE_KEY")
     or _get_secret("SUPABASE_PUBLISHABLE_KEY")
     or _get_secret("SUPABASE_ANON_KEY")
 )
@@ -113,10 +116,14 @@ def _parse_data(valor: Any) -> Optional[str]:
         return None
     if hasattr(valor, "date") and not isinstance(valor, str):
         return valor.date().isoformat()
+    texto = str(valor).strip()
+    marcador = _normalizar_texto(texto)
+    if marcador in {"nao se aplica", "nao aplicavel", "nao requerido", "nao informado", "n/a", "na", "-"}:
+        return None
     try:
-        return pd.to_datetime(str(valor).strip(), dayfirst=True, errors="raise").date().isoformat()
+        return pd.to_datetime(texto, dayfirst=True, errors="raise").date().isoformat()
     except Exception:
-        return str(valor).strip() or None
+        return texto or None
 
 
 def _normalizar_status(status: Any) -> str:
