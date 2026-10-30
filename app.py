@@ -77,7 +77,8 @@ def gestor_ifsc(gestor):
         "instituto_federal_de_educacao_ciencia_e_tecnologia",
         "instituto_federal_de_educacao_ciencia_e_tecnologia_de_santa_catarina",
     }
-    return chave in nomes_ifsc
+    # Aceita também cotitularidade/gestão conjunta, por exemplo IFSC/Unicentro.
+    return chave in nomes_ifsc or "ifsc" in chave.split("_")
 
 
 def status_impede_pagamento(status):
