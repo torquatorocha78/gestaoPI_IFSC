@@ -321,7 +321,8 @@ def _calcular_cronograma(data_dep: str, modalidade_pi: Any) -> List[Dict[str, An
         itens = [(1, "Taxa de depósito", 0)]
         itens += [(i + 1, f"{i}º quinquênio", i * 5) for i in range(1, 5)]
     else:
-        itens = [(i, f"{i}ª anuidade", i - 1) for i in range(1, 21)]
+        # As duas primeiras anuidades são isentas; a 3ª vence no segundo aniversário do depósito.
+        itens = [(i, f"{i}ª anuidade", i - 1) for i in range(3, 21)]
 
     cronograma = []
     for numero, descricao, anos in itens:
