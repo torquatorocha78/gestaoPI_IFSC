@@ -83,7 +83,7 @@ def montar_linhas_dashboard(df_pis, modalidade):
 
     for _, pi in df_pis.iterrows():
 
-        pagamentos = db.obter_anuidades(pi["id"])
+        pagamentos = db.obter_anuidades(pi["numero_patente"])
 
         for _, pgto in pagamentos.iterrows():
 
@@ -996,7 +996,7 @@ elif pagina == "📁 Gerenciar PIs":
         )
 
         pagamentos = db.obter_anuidades(
-            pi_id
+            pi["numero_patente"]
         )
 
         if pagamentos.empty:
@@ -1112,7 +1112,7 @@ elif pagina == "📁 Gerenciar PIs":
                     try:
 
                         db.atualizar_status_anuidade(
-                            pi_id,
+                            pi["numero_patente"],
                             opcoes_pagamento[
                                 num_pagamento
                             ],
@@ -1148,7 +1148,7 @@ elif pagina == "📁 Gerenciar PIs":
                     try:
 
                         db.atualizar_status_anuidade(
-                            pi_id,
+                            pi["numero_patente"],
                             opcoes_pagamento[
                                 num_pagamento
                             ],
