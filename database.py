@@ -580,6 +580,7 @@ def importar_pagamentos_planilha(arquivo: Any) -> Dict[str, Any]:
         "data": ("data pagamento", "data pag", "data"),
         "responsavel": ("servidor responsavel pelo envio", "responsavel"),
         "modalidade": ("modalidade",),
+        "ano": ("ano", "ano pagamento", "ano do pagamento"),
     }
     def norm(v: Any) -> str:
         return _normalizar_texto(v).replace("_", " ")
@@ -612,14 +613,32 @@ def importar_pagamentos_planilha(arquivo: Any) -> Dict[str, Any]:
                 valor = None
             sipac = _valor_limpo(row.get(cols["sipac"])) if cols["sipac"] else None
             responsavel = _valor_limpo(row.get(cols["responsavel"])) if cols["responsavel"] else None
+            ano_raw = _valor_limpo(row.get(cols["ano"])) if cols["ano"] else None
+            try:
+                ano = int(float(ano_raw)) if ano_raw is not None else (int(data[:4]) if data else None)
+                if ano is not None and not 1900 <= ano <= 2200:
+                    ano = None
+            except (TypeError, ValueError):
+                ano = None
             linhas.append({"numero_patente": str(processo).strip(), "gru": str(gru).strip(), "tipo_pagamento": str(tipo).strip(),
                 "valor": valor, "processo_sipac": sipac, "data_pagamento": data, "servidor_responsavel": responsavel,
-                "modalidade_pi": modalidade, "aba_origem": str(aba), "linha_origem": int(idx)+2})
+                "modalidade_pi": modalidade, "ano_pagamento": ano, "aba_origem": str(aba), "linha_origem": int(idx)+2})
     if not linhas:
         raise ValueError("Não encontrei linhas com processo, GRU e tipo de pagamento nas abas da planilha.")
-    # Tabela separada preserva múltiplas GRUs, inclusive pagamentos que não são anuidades.
-    _request("POST", f"{SUPABASE_URL}/rest/v1/pagamentos_inpi?on_conflict=gru", headers=_headers("resolution=ignore-duplicates,return=minimal"), json=linhas)
-    return {"importados": len(linhas), "abas": sorted({r['aba_origem'] for r in linhas}), "linhas": linhas, "erros": erros}
+    # Uma GRU repetida na fonte é enviada uma vez. Em reimportações, atualiza os
+    # dados da mesma GRU (corrigindo também importações anteriores com colunas erradas).
+    unicas: Dict[str, Dict[str, Any]] = {}
+    duplicadas_fonte = 0
+    for linha in linhas:
+        if linha["gru"] in unicas:
+            duplicadas_fonte += 1
+        unicas[linha["gru"]] = linha
+    linhas_unicas = list(unicas.values())
+    # Lotes pequenos evitam exceder limites do PostgREST.
+    for inicio in range(0, len(linhas_unicas), 100):
+        lote = linhas_unicas[inicio:inicio + 100]
+        _request("POST", f"{SUPABASE_URL}/rest/v1/pagamentos_inpi?on_conflict=gru", headers=_headers("resolution=merge-duplicates,return=minimal"), json=lote)
+    return {"importados": len(linhas_unicas), "duplicadas_fonte": duplicadas_fonte, "abas": sorted({r['aba_origem'] for r in linhas}), "linhas": linhas_unicas, "erros": erros}
 
 def deletar_patente(patente_id: Any) -> None:
     _request("DELETE", _patente_url(patente_id), headers=_headers("return=minimal"))
