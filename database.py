@@ -124,6 +124,11 @@ def _parse_data(valor: Any) -> Optional[str]:
     valor = _valor_limpo(valor)
     if valor is None:
         return None
+    if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        try:
+            return (pd.Timestamp("1899-12-30") + pd.to_timedelta(float(valor), unit="D")).date().isoformat()
+        except Exception:
+            return None
     if hasattr(valor, "date") and not isinstance(valor, str):
         return valor.date().isoformat()
     texto = str(valor).strip()
@@ -507,6 +512,10 @@ def atualizar_status_anuidade(
     numero_anuidade: int,
     novo_status: str,
     data_pagamento: Optional[str] = None,
+    gru: Optional[str] = None,
+    valor_pagamento: Optional[Any] = None,
+    processo_sipac: Optional[str] = None,
+    servidor_responsavel: Optional[str] = None,
 ) -> None:
     """Atualiza ou cria o registro da anuidade sem depender de constraint UNIQUE."""
     try:
@@ -523,6 +532,16 @@ def atualizar_status_anuidade(
             "status": novo_status,
             "data_pagamento": _parse_data(data_pagamento) if data_pagamento else None,
         }
+        # Campos opcionais são enviados apenas quando o schema remoto os possui.
+        # Mantém compatibilidade com bases ainda não migradas.
+        if gru:
+            payload["gru"] = str(gru).strip()
+        if valor_pagamento not in (None, ""):
+            payload["valor"] = float(valor_pagamento)
+        if processo_sipac:
+            payload["processo_sipac"] = str(processo_sipac).strip()
+        if servidor_responsavel:
+            payload["servidor_responsavel"] = str(servidor_responsavel).strip()
 
         if existente:
             registro_id = existente[0].get("id")
@@ -547,6 +566,60 @@ def atualizar_status_anuidade(
             "Não foi possível registrar o pagamento da anuidade no Supabase. "
             f"Detalhe: {exc}"
         ) from exc
+
+
+def importar_pagamentos_planilha(arquivo: Any) -> Dict[str, Any]:
+    """Importa cada GRU como transação; associa anuidades quando identificáveis."""
+    abas = pd.read_excel(arquivo, sheet_name=None, dtype=object)
+    aliases = {
+        "processo": ("numero do processo", "numero do processo"),
+        "gru": ("gru",),
+        "tipo": ("tipo de pagamento",),
+        "valor": ("valor", "valor pago"),
+        "sipac": ("processo sipac do pagamento", "processo sipac de pagamento"),
+        "data": ("data pagamento", "data pag", "data"),
+        "responsavel": ("servidor responsavel pelo envio", "responsavel"),
+        "modalidade": ("modalidade",),
+    }
+    def norm(v: Any) -> str:
+        return _normalizar_texto(v).replace("_", " ")
+    linhas: List[Dict[str, Any]] = []
+    erros: List[str] = []
+    for aba, df in abas.items():
+        headers = {norm(c): c for c in df.columns}
+        cols = {}
+        for key, opts in aliases.items():
+            cols[key] = next((headers[o] for o in opts if o in headers), None)
+        if not cols["processo"] or not cols["gru"] or not cols["tipo"]:
+            continue
+        for idx, row in df.iterrows():
+            processo = _valor_limpo(row.get(cols["processo"]))
+            gru = _valor_limpo(row.get(cols["gru"]))
+            tipo = _valor_limpo(row.get(cols["tipo"]))
+            if not processo or not gru or not tipo:
+                continue
+            modalidade = normalizar_modalidade(row.get(cols["modalidade"])) if cols["modalidade"] else _modalidade_por_numero(processo) or "Patente"
+            data = _parse_data(row.get(cols["data"])) if cols["data"] else None
+            valor = row.get(cols["valor"]) if cols["valor"] else None
+            try:
+                if isinstance(valor, str):
+                    valor = float(valor.replace("R$", "").replace(" ", "").replace(".", "").replace(",", "."))
+                elif valor is not None and not pd.isna(valor):
+                    valor = float(valor)
+                else:
+                    valor = None
+            except (ValueError, TypeError):
+                valor = None
+            sipac = _valor_limpo(row.get(cols["sipac"])) if cols["sipac"] else None
+            responsavel = _valor_limpo(row.get(cols["responsavel"])) if cols["responsavel"] else None
+            linhas.append({"numero_patente": str(processo).strip(), "gru": str(gru).strip(), "tipo_pagamento": str(tipo).strip(),
+                "valor": valor, "processo_sipac": sipac, "data_pagamento": data, "servidor_responsavel": responsavel,
+                "modalidade_pi": modalidade, "aba_origem": str(aba), "linha_origem": int(idx)+2})
+    if not linhas:
+        raise ValueError("Não encontrei linhas com processo, GRU e tipo de pagamento nas abas da planilha.")
+    # Tabela separada preserva múltiplas GRUs, inclusive pagamentos que não são anuidades.
+    _request("POST", f"{SUPABASE_URL}/rest/v1/pagamentos_inpi?on_conflict=gru", headers=_headers("resolution=ignore-duplicates,return=minimal"), json=linhas)
+    return {"importados": len(linhas), "abas": sorted({r['aba_origem'] for r in linhas}), "linhas": linhas, "erros": erros}
 
 def deletar_patente(patente_id: Any) -> None:
     _request("DELETE", _patente_url(patente_id), headers=_headers("return=minimal"))
