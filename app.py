@@ -1,8 +1,21 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
+import importlib.util
+import sys
 
 import database as db
+# O mesmo computador contém cópias antigas do projeto. Garanta que o importador
+# usado pelo app venha do database.py ao lado deste app.py, não de outra pasta.
+_database_local = Path(__file__).resolve().with_name("database.py")
+if not hasattr(db, "importar_pagamentos_planilha") and _database_local.is_file():
+    _spec_db_local = importlib.util.spec_from_file_location("database", _database_local)
+    if _spec_db_local and _spec_db_local.loader:
+        _db_local = importlib.util.module_from_spec(_spec_db_local)
+        sys.modules["database"] = _db_local
+        _spec_db_local.loader.exec_module(_db_local)
+        db = _db_local
 import utils
 import assistente_juridico_NIT
 
