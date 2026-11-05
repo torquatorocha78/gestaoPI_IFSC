@@ -1227,8 +1227,8 @@ elif pagina == "📤 Importar Excel":
     st.subheader("Importar pagamentos INPI (GRU)")
     st.caption("Importa cada GRU como transação, preservando pagamentos que não são anuidades.")
     arquivo_pagamentos = st.file_uploader(
-        "Selecione Taxas INPI - Processos SIPAC (.xlsx)",
-        type=["xlsx"],
+        "Selecione a planilha de pagamentos (.xls ou .xlsx)",
+        type=["xls", "xlsx"],
         key="importacao_pagamentos_inpi",
     )
     if arquivo_pagamentos is not None:
@@ -1243,7 +1243,9 @@ elif pagina == "📤 Importar Excel":
             st.warning("A importação ignora GRUs já existentes e mantém os registros originais.")
             if st.button("Importar pagamentos para o Supabase", type="primary", key="confirmar_importacao_pagamentos"):
                 resultado = db.importar_pagamentos_planilha(arquivo_pagamentos)
-                st.success(f"Importação concluída: {resultado['importados']} pagamento(s) enviados; abas: {', '.join(resultado['abas'])}.")
+                st.success(f"Importação concluída: {resultado['importados']} GRU(s) inseridas ou atualizadas. A coluna Ano foi reconhecida.")
+                if resultado.get("duplicadas_fonte"):
+                    st.warning(f"A planilha continha {resultado['duplicadas_fonte']} repetição(ões) de GRU; cada GRU foi processada uma vez.")
         except Exception as exc:
             st.error(f"Não foi possível preparar a importação: {exc}")
 
