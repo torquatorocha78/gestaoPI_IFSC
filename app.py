@@ -1143,6 +1143,74 @@ elif pagina == "📁 Gerenciar PIs":
                         st.error(str(exc))
 
         # ----------------------------------------------------
+        # PAGAMENTOS IMPORTADOS DA PLANILHA
+        # ----------------------------------------------------
+        st.markdown("#### Pagamentos já realizados (planilha INPI)")
+        try:
+            pagamentos_importados = db.obter_pagamentos_inpi(pi["numero_patente"])
+        except Exception as exc:
+            pagamentos_importados = pd.DataFrame()
+            st.error(f"Não foi possível consultar os pagamentos importados: {exc}")
+
+        if pagamentos_importados.empty:
+            st.info("Nenhuma GRU importada foi vinculada a este número de processo.")
+        else:
+            colunas = [
+                ("ano_pagamento", "Ano"), ("gru", "GRU"),
+                ("tipo_pagamento", "Tipo de pagamento"), ("valor", "Valor (R$)"),
+                ("data_pagamento", "Data"), ("processo_sipac", "Processo SIPAC"),
+                ("servidor_responsavel", "Responsável"),
+            ]
+            visiveis = {orig: rotulo for orig, rotulo in colunas if orig in pagamentos_importados.columns}
+            st.dataframe(
+                pagamentos_importados[list(visiveis)].rename(columns=visiveis),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # Permite dar baixa no cronograma somente quando o tipo identifica
+            # claramente uma anuidade e o número existe para esta PI.
+            import re
+            mapa_anuidades = {
+                int(row["numero_anuidade"]): row
+                for _, row in pagamentos.iterrows()
+                if str(row.get("numero_anuidade", "")).strip().isdigit()
+            } if "pagamentos" in locals() and not pagamentos.empty else {}
+            opcoes_baixa = {}
+            for _, transacao in pagamentos_importados.iterrows():
+                tipo = str(transacao.get("tipo_pagamento") or "")
+                achado = re.search(r"\b(\d{1,2})\s*[ªº]?\s*anuidade\b", tipo, re.IGNORECASE)
+                if not achado:
+                    continue
+                numero = int(achado.group(1))
+                if numero not in mapa_anuidades:
+                    continue
+                gru = str(transacao.get("gru") or "")
+                opcoes_baixa[f"{numero}ª anuidade — GRU {gru} ({transacao.get('data_pagamento') or 'sem data'})"] = (numero, transacao)
+            if opcoes_baixa:
+                st.markdown("**Dar baixa em anuidade do cronograma**")
+                escolha_baixa = st.selectbox(
+                    "Selecione o pagamento da planilha",
+                    list(opcoes_baixa),
+                    key=f"baixa_planilha_{pi_id}",
+                )
+                if st.button("Registrar como pago no cronograma", key=f"confirmar_baixa_planilha_{pi_id}"):
+                    numero, transacao = opcoes_baixa[escolha_baixa]
+                    try:
+                        db.atualizar_status_anuidade(
+                            pi["numero_patente"], numero, "pago",
+                            transacao.get("data_pagamento"),
+                            gru=transacao.get("gru"),
+                            valor_pagamento=transacao.get("valor"),
+                            processo_sipac=transacao.get("processo_sipac"),
+                            servidor_responsavel=transacao.get("servidor_responsavel"),
+                        )
+                        st.success(f"{numero}ª anuidade registrada como paga.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Não foi possível dar baixa na anuidade: {exc}")
+
+        # ----------------------------------------------------
         # DELETAR
         # ----------------------------------------------------
 
