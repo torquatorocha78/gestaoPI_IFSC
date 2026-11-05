@@ -640,6 +640,19 @@ def importar_pagamentos_planilha(arquivo: Any) -> Dict[str, Any]:
         _request("POST", f"{SUPABASE_URL}/rest/v1/pagamentos_inpi?on_conflict=gru", headers=_headers("resolution=merge-duplicates,return=minimal"), json=lote)
     return {"importados": len(linhas_unicas), "duplicadas_fonte": duplicadas_fonte, "abas": sorted({r['aba_origem'] for r in linhas}), "linhas": linhas_unicas, "erros": erros}
 
+
+def obter_pagamentos_inpi(numero_processo: Any) -> pd.DataFrame:
+    """Busca transações pela chave de processo da PI, sem misturar pagamentos."""
+    chave = str(numero_processo or "").strip()
+    if not chave:
+        return pd.DataFrame()
+    dados = _request(
+        "GET",
+        f"{SUPABASE_URL}/rest/v1/pagamentos_inpi?select=*&numero_patente=eq.{quote(chave, safe='')}&order=data_pagamento.desc.nullslast,gru.asc",
+        headers=_headers(),
+    )
+    return pd.DataFrame(dados or [])
+
 def deletar_patente(patente_id: Any) -> None:
     _request("DELETE", _patente_url(patente_id), headers=_headers("return=minimal"))
 
