@@ -1135,26 +1135,35 @@ elif pagina == "📁 Gerenciar PIs":
 
         st.divider()
 
+        chave_confirmacao = f"confirmar_exclusao_{pi_id}"
         if st.button(
             "🗑️ Deletar PI",
             use_container_width=True,
             type="secondary",
+            key=f"solicitar_exclusao_{pi_id}",
         ):
+            st.session_state[chave_confirmacao] = True
 
-            if st.checkbox(
-                "Tenho certeza que desejo deletar "
-                "esta PI definitivamente?"
-            ):
-
-                db.deletar_patente(
-                    pi_id
-                )
-
-                st.success(
-                    "PI deletada com sucesso."
-                )
-
-                st.rerun()
+        if st.session_state.get(chave_confirmacao):
+            st.warning("Esta ação excluirá permanentemente a PI e os registros vinculados.")
+            certeza = st.checkbox(
+                "Tenho certeza que desejo deletar esta PI definitivamente?",
+                key=f"checkbox_exclusao_{pi_id}",
+            )
+            confirmar, cancelar = st.columns(2)
+            with confirmar:
+                if st.button("Confirmar exclusão", type="primary", disabled=not certeza, key=f"confirmar_exclusao_btn_{pi_id}"):
+                    try:
+                        db.deletar_patente(pi_id)
+                        st.session_state.pop(chave_confirmacao, None)
+                        st.success("PI deletada com sucesso.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Não foi possível deletar a PI: {exc}")
+            with cancelar:
+                if st.button("Cancelar", key=f"cancelar_exclusao_{pi_id}"):
+                    st.session_state.pop(chave_confirmacao, None)
+                    st.rerun()
 
 
 # ============================================================
@@ -1213,6 +1222,30 @@ elif pagina == "📤 Importar Excel":
                     )
         except Exception as exc:
             st.error(f"❌ Erro ao processar a planilha: {exc}")
+
+    st.divider()
+    st.subheader("Importar pagamentos INPI (GRU)")
+    st.caption("Importa cada GRU como transação, preservando pagamentos que não são anuidades.")
+    arquivo_pagamentos = st.file_uploader(
+        "Selecione Taxas INPI - Processos SIPAC (.xlsx)",
+        type=["xlsx"],
+        key="importacao_pagamentos_inpi",
+    )
+    if arquivo_pagamentos is not None:
+        try:
+            previa_abas = pd.read_excel(arquivo_pagamentos, sheet_name=None, dtype=object)
+            previa = pd.concat(
+                [df.assign(_aba=aba) for aba, df in previa_abas.items()],
+                ignore_index=True,
+            )
+            st.info(f"{len(previa)} linha(s) nas abas: {', '.join(previa_abas)}")
+            st.dataframe(previa, use_container_width=True, hide_index=True)
+            st.warning("A importação ignora GRUs já existentes e mantém os registros originais.")
+            if st.button("Importar pagamentos para o Supabase", type="primary", key="confirmar_importacao_pagamentos"):
+                resultado = db.importar_pagamentos_planilha(arquivo_pagamentos)
+                st.success(f"Importação concluída: {resultado['importados']} pagamento(s) enviados; abas: {', '.join(resultado['abas'])}.")
+        except Exception as exc:
+            st.error(f"Não foi possível preparar a importação: {exc}")
 
 
 # ============================================================
