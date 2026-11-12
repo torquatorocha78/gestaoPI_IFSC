@@ -161,7 +161,8 @@ def montar_linhas_dashboard(df_pis, modalidade):
 
 
 def dashboard_modalidade(titulo, modalidade):
-    st.title(titulo)
+    if modalidade != "Software":
+        st.title(titulo)
     df = db.obter_patentes()
     if df.empty:
         st.info("Nenhuma PI cadastrada ainda.")
@@ -170,6 +171,11 @@ def dashboard_modalidade(titulo, modalidade):
     df_tipo = df[
         df["modalidade_pi"].apply(db.normalizar_modalidade) == modalidade
     ].copy()
+
+    if modalidade == "Software":
+        dashboard_vitrine_softwares(df_tipo)
+        return
+
     df_ifsc = df_tipo[df_tipo["gestor"].apply(gestor_ifsc)]
     linhas, linhas_nao_pagar = montar_linhas_dashboard(df_tipo, modalidade)
     df_dash = pd.DataFrame(linhas)
@@ -211,6 +217,113 @@ def dashboard_modalidade(titulo, modalidade):
         st.info("Não há registros IFSC com status indeferido, descontinuado ou arquivado.")
     else:
         st.dataframe(df_nao_pagar, use_container_width=True, hide_index=True)
+
+
+def dashboard_vitrine_softwares(df_softwares):
+    """Vitrine de softwares: cada registro tem uma única taxa de depósito."""
+    st.title("💻 Vitrine Tecnológica de Softwares")
+    st.caption(
+        "Catálogo de todos os softwares cadastrados. O registro de software tem "
+        "pagamento único de depósito, sem anuidades recorrentes."
+    )
+
+    if df_softwares.empty:
+        st.info("Nenhum software cadastrado ainda.")
+        return
+
+    softwares = df_softwares.copy()
+    pagamentos = {}
+    for _, software in softwares.iterrows():
+        processo = text_clean(software.get("numero_patente"))
+        status_pagamento_unico = "Não informado"
+        if processo:
+            try:
+                cronograma = db.obter_anuidades(processo)
+                if not cronograma.empty:
+                    status = text_clean(cronograma.iloc[0].get("status"))
+                    if status == "pago":
+                        status_pagamento_unico = "Pago"
+                    elif status == "nao_pagar":
+                        status_pagamento_unico = "Dispensado"
+                    else:
+                        status_pagamento_unico = "Pendente"
+            except Exception:
+                # A vitrine continua disponível mesmo se o histórico financeiro falhar.
+                status_pagamento_unico = "Não informado"
+        pagamentos[processo] = status_pagamento_unico
+
+    softwares["_pagamento_unico"] = softwares["numero_patente"].apply(
+        lambda numero: pagamentos.get(text_clean(numero), "Não informado")
+    )
+
+    total_pago = int((softwares["_pagamento_unico"] == "Pago").sum())
+    total_pendente = int((softwares["_pagamento_unico"] == "Pendente").sum())
+    c1, c2, c3 = st.columns(3)
+    c1.metric("🧩 Softwares no catálogo", len(softwares))
+    c2.metric("✅ Taxa única paga", total_pago)
+    c3.metric("⏳ Taxa única pendente", total_pendente)
+    st.divider()
+
+    for inicio in range(0, len(softwares), 2):
+        colunas = st.columns(2)
+        for coluna, (_, software) in zip(
+            colunas, softwares.iloc[inicio:inicio + 2].iterrows()
+        ):
+            with coluna:
+                with st.container(border=True):
+                    titulo = text_clean(software.get("titulo")) or "Software sem título"
+                    st.subheader(f"🧩 {titulo}")
+                    st.caption(
+                        f"Processo: {text_clean(software.get('numero_patente')) or 'Não informado'}"
+                        f" · Taxa única: {software['_pagamento_unico']}"
+                    )
+
+                    descricao = text_clean(software.get("descricao"))
+                    if descricao:
+                        st.write(descricao)
+
+                    detalhes = [
+                        ("Autores / inventores", software.get("inventores")),
+                        ("Titular", software.get("titular")),
+                        ("Campus", software.get("campus")),
+                        ("Área de aplicação", software.get("campo_aplicacao")),
+                        ("Tipo de programa", software.get("tipo_programa")),
+                        ("Linguagem", software.get("linguagem")),
+                        ("Data de depósito", software.get("data_deposito")),
+                        ("Status", software.get("status")),
+                    ]
+                    preenchidos = [
+                        (rotulo, text_clean(valor))
+                        for rotulo, valor in detalhes
+                        if text_clean(valor)
+                    ]
+                    if preenchidos:
+                        for rotulo, valor in preenchidos:
+                            st.markdown(f"**{rotulo}:** {valor}")
+                    else:
+                        st.caption("Ainda não há detalhes adicionais cadastrados.")
+
+    st.divider()
+    st.subheader("Visão geral do catálogo")
+    colunas_tabela = {
+        "titulo": "Software",
+        "numero_patente": "Processo",
+        "descricao": "Resumo",
+        "inventores": "Autores / inventores",
+        "titular": "Titular",
+        "campus": "Campus",
+        "campo_aplicacao": "Área de aplicação",
+        "tipo_programa": "Tipo de programa",
+        "linguagem": "Linguagem",
+        "data_deposito": "Data de depósito",
+        "status": "Status",
+        "_pagamento_unico": "Pagamento único",
+    }
+    disponiveis = [c for c in colunas_tabela if c in softwares.columns]
+    tabela = softwares[disponiveis].rename(
+        columns={c: colunas_tabela[c] for c in disponiveis}
+    )
+    st.dataframe(tabela, use_container_width=True, hide_index=True)
 
 
 # ============================================================
